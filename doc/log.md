@@ -1,5 +1,20 @@
-# Log of development, Chinese edition.
+# 开发日志
 * * *
+
+## 20151226 需求驱动
+
+### 数据对象的行为
+如果当前 Javascript 引擎支持 ES6 proxy 的话，"."可以是唯一的行为。当前，则是 get 和 set 两个方法。
+
+### get 函数参数设置
+get函数的标准形式是：`get(key) => value` 当用get函数获取层级数据时，一种方法是在key参数中加入层级。key可以是数组 `[root, branch, leaf]`。另一种方法是采用ES6推荐的层级调用模式 get(root).get(branch).get(leaf). 第一种效率高些，第二种则更加javascript化。好吧，我选第二种。
+
+为了避免出现递归循环，get层级操作时需要加入对递归次数参数。类似这样的参数还很多，因此，get函数需要加第二个参数options。从容易遍历操作的角度来看，options采用数组比较合适；从容易选择操作来讲，采用对象更方便。我还选对象形式，这样也是更加Javascript化些。此外，options也可以为基础数据类型，如字符串、数字等，当然也包括 undefined、null。
+
+因此，get 的函数形式为： `get(key, options) => value`。 避免suprise的话，默认 `options = {}`
+
+### set 函数
+同样的，set函数形式定义为：`set(key, value, options) => key`。options中有 `create: true` 时，当key不存在时，自动创建该key；否则set函数不成功。函数调用成功的返回值为key，失败的话返回`null`。参数key为`void 0`时，表明要创建新的数据项，返回新的key值。
 
 ## 20151225 起航
 
