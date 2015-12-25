@@ -8,9 +8,5 @@
     "/np": "controllers/np.js"
   },
   "lib": "lib",
-  "scripts": {
-    "setup": "scripts/setup.js",
-    "teardown": "scripts/teardown.js"
-  },
   "tests": "test/**/*.js"
 }
