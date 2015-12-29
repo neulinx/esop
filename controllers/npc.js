@@ -1,42 +1,34 @@
+/*globals require, applicationContext */
+
 const _ = require('underscore');
-const _Joi = require('joi');
-const _Foxx = require('org/arangodb/foxx');
-const _ArangoError = require('org/arangodb').ArangoError;
-const _Np = require('../models/np');
-const _Controller = new _Foxx.Controller(applicationContext);
+const Joi = require('joi');
+const Foxx = require('org/arangodb/foxx');
+const ArangoError = require('org/arangodb').ArangoError;
+const Controller = new Foxx.Controller(applicationContext);
 
-const SystemIdSchema = Joi.string().required()
-.description('The name of the system.')
-.meta({allowMultiple: false});
+// Platform
+import Platform from 'platform'
+const Np = new Platform(applicationContext)
+const IPlat = Np.get('reactions')
 
-var npRepo = new NpRepo(
-  applicationContext.collection('np'),
-  {model: Np}
-);
-
-/** Lists of all np.
+/** Lists of all systems on the platform.
  *
- * This function simply returns the list of all Np.
+ * This function simply returns the list of all systems.
  */
-controller.get('/', function (req, res) {
-  res.json(_.map(npRepo.all(), function (model) {
-    return model.forClient();
-  }));
-});
+// Display greeting message.
+Controller.get('/', function (req, res) {
+  res.set("Content-Type", "text/plain; charset=utf-8")
+  res.body = "Welcome to Neulinx Platform!\n"
+})
 
-/** Creates a new np.
+/** Creates a new system.
  *
- * Creates a new np. The information has to be in the
+ * Creates a new system. The information has to be in the
  * requestBody.
  */
-controller.post('/', function (req, res) {
-  var np = req.parameters.np;
-  res.json(npRepo.save(np).forClient());
-})
-.bodyParam('np', {
-  description: 'The np you want to create',
-  type: Np
-});
+Controller.post('/', function (req, res) {
+  res.json(IPlat.post(req));
+}).bodyParam('system')
 
 /** Reads a np.
  *
@@ -46,8 +38,8 @@ controller.get('/:id', function (req, res) {
   var id = req.urlParameters.id;
   res.json(npRepo.byId(id).forClient());
 })
-.pathParam('id', npIdSchema)
-.errorResponse(ArangoError, 404, 'The np could not be found');
+  .pathParam('id', npIdSchema)
+  .errorResponse(ArangoError, 404, 'The np could not be found');
 
 /** Replaces a np.
  *
@@ -59,12 +51,12 @@ controller.put('/:id', function (req, res) {
   var np = req.parameters.np;
   res.json(npRepo.replaceById(id, np));
 })
-.pathParam('id', npIdSchema)
-.bodyParam('np', {
-  description: 'The np you want your old one to be replaced with',
-  type: Np
-})
-.errorResponse(ArangoError, 404, 'The np could not be found');
+  .pathParam('id', npIdSchema)
+  .bodyParam('np', {
+    description: 'The np you want your old one to be replaced with',
+    type: Np
+  })
+  .errorResponse(ArangoError, 404, 'The np could not be found');
 
 /** Updates a np.
  *
@@ -76,12 +68,12 @@ controller.patch('/:id', function (req, res) {
   var patchData = req.parameters.patch;
   res.json(npRepo.updateById(id, patchData));
 })
-.pathParam('id', npIdSchema)
-.bodyParam('patch', {
-  description: 'The patch data you want your np to be updated with',
-  type: joi.object().required()
-})
-.errorResponse(ArangoError, 404, 'The np could not be found');
+  .pathParam('id', npIdSchema)
+  .bodyParam('patch', {
+    description: 'The patch data you want your np to be updated with',
+    type: joi.object().required()
+  })
+  .errorResponse(ArangoError, 404, 'The np could not be found');
 
 /** Removes a np.
  *
@@ -90,7 +82,7 @@ controller.patch('/:id', function (req, res) {
 controller.delete('/:id', function (req, res) {
   var id = req.urlParameters.id;
   npRepo.removeById(id);
-  res.json({success: true});
+  res.json({ success: true });
 })
-.pathParam('id', npIdSchema)
-.errorResponse(ArangoError, 404, 'The np could not be found');
+  .pathParam('id', npIdSchema)
+  .errorResponse(ArangoError, 404, 'The np could not be found');
