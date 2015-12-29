@@ -1,6 +1,12 @@
 # 开发日志
 * * *
 
+## 20151230 system
+
+- 分离数据与行为；分离内部与外部API。
+- 把系统作为平台的一级成员。
+
+
 ## 20151229 result
 设计一种标准的返回格式。参考 Erlang SOP 项目。`{Directive, Output, NewState}`
 
