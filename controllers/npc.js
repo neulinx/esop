@@ -1,11 +1,13 @@
 /*globals require, applicationContext */
+'use strict'
 
 const Foxx = require('org/arangodb/foxx');
 const Controller = new Foxx.Controller(applicationContext);
 
 // Platform
-import Platform from 'platform'
-const Np = new Platform(applicationContext)
+//import Platform from 'platform'
+const Plt = require('platform')
+const Np = new Plt.Platform(applicationContext)
 const Npi = Np.get('reactions')
 
 /** Lists of all systems on the platform.
