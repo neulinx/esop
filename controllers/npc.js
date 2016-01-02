@@ -6,8 +6,8 @@ const Controller = new Foxx.Controller(applicationContext);
 
 // Platform
 //import Platform from 'platform'
-const Plt = require('platform')
-const Np = new Plt.Platform(applicationContext)
+const Platform = require('platform').Platform
+const Np = new Platform(applicationContext)
 const Npi = Np.get('reactions')
 
 /** Lists of all systems on the platform.
@@ -27,5 +27,4 @@ Controller.get('/', function (req, res) {
  */
 Controller.post('/', function (req, res) {
   res.json(Npi.post(req));
-}).bodyParam('system')
-
+})

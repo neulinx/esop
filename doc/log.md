@@ -1,6 +1,18 @@
 # 开发日志
 * * *
 
+## 20160101 滚回ES5
+开开心心ES6，垂头丧气滚回ES5.
+首先是 harmony_modules 居然当前所有版本的V8都不支持。然后是居然 arangodb 居然不支持 arrow function。最后是 Object.assign 都不支持。看看当前的arangodb development 分支，V8引擎用的居然还是 v4.3.61，连4.5都不是。当然，狠一点可以在本机使用最新的V8, 但是看看V8对ES6当前的兼容性... ... 别折腾了，还是滚回ES5吧。不过不甘心的我还是命令行启用了 arrow function。
+
+```
+echo $(arangosh --javascript.v8-options="--help" | awk '/harmony/ && $1 ~ /^--/{print $1}')
+
+--es_staging --harmony --harmony_shipping --harmony_modules --harmony_arrays --harmony_array_includes --harmony_regexps --harmony_arrow_functions --harmony_proxies --harmony_sloppy --harmony_unicode --harmony_unicode_regexps --harmony_rest_parameters --harmony_reflect --harmony_computed_property_names --harmony_tostring --harmony_numeric_literals --harmony_classes --harmony_object_literals
+
+```
+
+
 ## 20151230 system
 
 - 分离数据与行为；分离内部与外部API。
