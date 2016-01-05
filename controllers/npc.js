@@ -6,8 +6,8 @@ const Controller = new Foxx.Controller(applicationContext);
 
 // Platform
 //import Platform from 'platform'
-const Platform = require('platform').Platform
-const Np = new Platform(applicationContext)
+const Platform = require('platform')
+const Np = Platform.create(applicationContext)
 const Npi = Np.get('reactions')
 
 /** Lists of all systems on the platform.
