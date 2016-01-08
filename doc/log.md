@@ -1,5 +1,10 @@
 # 开发日志
 * * *
+## 20160108 存储封装
+封装arangodb collection的行为。当前只支持get/set两种方法。其中set方法中隐含支持 update 和 remove。
+
+由于arangodb是一个document数据库，对key-value数据不提供直接的访问支持。看到arangodb中对嵌套的json数据对象的处理效率还不错，对于key-value对类型的数据，统一增加key和value字段。
+
 ## 20160105 回退
 ### 隐变量
 去除`action`和`reaction`中的`this`后，面临了一个问题。当外部使用这些API时，必须传递进去`state`变量，而这个显式的变量具有对这个`actor`的最高级别的访问权限，这就带来了安全性设计的隐患。因此，还是回到以`this`作为隐式变量的方式，来规避对数据访问权限的滥用。
