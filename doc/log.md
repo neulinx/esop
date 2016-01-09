@@ -1,5 +1,8 @@
 # 开发日志
 * * *
+## 20160109 kv store
+重新进行设计，强制支持 kv store
+
 ## 20160108 存储封装
 封装arangodb collection的行为。当前只支持get/set两种方法。其中set方法中隐含支持 update 和 remove。
 
