@@ -2,7 +2,7 @@
   "name": "sop",
   "description": "State-Oriented Platform of Neulinx based on arangodb.",
   "author": "Gary Hai",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "license": "MIT",
   "controllers": {
     "/platform": "controllers/npc.js"
