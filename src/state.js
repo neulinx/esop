@@ -2,8 +2,8 @@
 // --SECTION--  global
 // -----------------------------------------------------------------------------
 
-import {db as _db} from 'org/arangodb'
-import {internal as _internal} from 'internal'
+const _db = require('org/arangodb').db
+const _internal = require('internal')
 
 // -----------------------------------------------------------------------------
 // --SECTION--  state factory
@@ -165,7 +165,7 @@ function wrap(object) {
     return key
   }
 
-  return { get: get, set: set }
+  return { get, set }
 }
 
 // todo: exceptions handler or never
