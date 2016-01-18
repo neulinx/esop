@@ -4,7 +4,7 @@ MOUNT = /neulinx
 
 lib: $(LIB)
 lib/%.js: src/%.js
-	mkdir -p $(@D)
+	@mkdir -p $(@D)
 	babel $< -o $@
 
 install: lib
@@ -20,4 +20,4 @@ uninstall:
 	foxx-manager uninstall $(MOUNT)
 
 clean:
-	rm lib/*.js
+	@rm lib/*.js
