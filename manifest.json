@@ -5,7 +5,7 @@
   "version": "0.0.0",
   "license": "MIT",
   "controllers": {
-    "/p": "controllers/npc.js"
+    "/p": "lib/npc.js"
   },
   "lib": "lib",
   "tests": "test/**/*.js"

@@ -8,7 +8,13 @@ const _internal = require('internal')
 // -----------------------------------------------------------------------------
 // --SECTION--  state factory
 // -----------------------------------------------------------------------------
-function create(id, options) {
+function create(actor, options) {
+  let state = actor
+  if (typeof actor === 'string') {
+    if (options.meta) {
+      state = options.meta.get(actor)
+    }
+  }
   function get(key) {
     return void 0
   }
@@ -112,7 +118,7 @@ function wrapCollection(collectionName, options) {
     return k[keyName]
   }
 
-  return { get: get, set: set }
+  return { get, set }
 }
 
 // 128 bits
@@ -196,6 +202,13 @@ function aggregate(...containers) {
 // -----------------------------------------------------------------------------
 // --SECTION--  exports
 // -----------------------------------------------------------------------------
-export {result, ok, error}
-export {wrap, aggregate, Accessor}
-export {gen_guid, gen_key}
+exports.result = result;
+exports.ok = ok;
+exports.error = error;
+
+exports.wrap = wrap;
+exports.aggregate = aggregate;
+exports.Accessor = Accessor;
+
+exports.gen_guid = gen_guid;
+exports.gen_key = gen_key;
