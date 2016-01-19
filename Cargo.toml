@@ -1,0 +1,6 @@
+[package]
+name = "sop"
+version = "0.1.0"
+authors = ["garyhai <gary@XL59.com>"]
+
+[dependencies]
