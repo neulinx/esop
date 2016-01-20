@@ -1,7 +1,8 @@
 PKG_NAME = sop
 SRC = $(wildcard es/*.js)
 LIB = $(SRC:es/%.js=foxx/lib/%.js)
-MOUNT = /neulinx
+TARGET = /neulinx
+SOURCE = foxx
 
 lib: $(LIB)
 foxx/lib/%.js: es/%.js
@@ -9,16 +10,16 @@ foxx/lib/%.js: es/%.js
 	babel $< -o $@
 
 install: lib
-	foxx-manager install . $(MOUNT)
+	foxx-manager install $(SOURCE) $(TARGET)
 
 upgrade: lib
-	foxx-manager upgrade . $(MOUNT)
+	foxx-manager upgrade $(SOURCE) $(TARGET)
 
 replace: lib
-	foxx-manager replace . $(MOUNT)
+	foxx-manager replace $(SOURCE) $(TARGET)
 
 uninstall:
-	foxx-manager uninstall $(MOUNT)
+	foxx-manager uninstall $(TARGET)
 
 clean:
 	@rm foxx/lib/*.js
