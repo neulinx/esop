@@ -1,3 +1,4 @@
 target
 *.bk
 node_modules
+.vagrant
