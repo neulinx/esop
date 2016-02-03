@@ -6,7 +6,8 @@ ENV build_date 2014-12-05 001
 RUN yum update -y
 RUN yum install -y epel-release
 RUN yum install -y nano wget inotify-tools rsyslog
-RUN wget -O /etc/yum.repos.d/kamailio.repo http://download.opensuse.org/repositories/home:/kamailio:/telephony/CentOS_CentOS-6/home:kamailio:telephony.repo
+RUN curl -o /etc/yum.repos.d/kamailio.repo -s http://download.opensuse.org/repositories/home:/kamailio:/v4.3.x-rpms/CentOS_6/home:kamailio:v4.3.x-rpms.repo
+#RUN wget -O /etc/yum.repos.d/kamailio.repo http://download.opensuse.org/repositories/home:/kamailio:/telephony/CentOS_CentOS-6/home:kamailio:telephony.repo
 RUN yum install -y kamailio
 
 # -------------------- Kamailio configs
