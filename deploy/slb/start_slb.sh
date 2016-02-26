@@ -6,4 +6,4 @@ docker run \
     --name slb \
     -p 5060:5060/udp \
     -v `pwd`:/etc/kamailio \
-    garyhai/slb
+    -d garyhai/slb
