@@ -88,7 +88,7 @@ function aggregate(...containers) {
     }
   }
 
-  return { get, set }
+  return { get, set}
 }
 
 function wrapCollection(collectionName, options) {

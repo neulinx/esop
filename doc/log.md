@@ -1,6 +1,27 @@
 # 开发日志
 * * *
 
+## 20160223 Total Platform
+时代在变化，运维研发已经融合，全面采用软件开发技术实现全平台的构建，包括部署。
+
+我个人来讲，
+
+采用容器化平台部署的几个问题
+
+* 采用哪种API或者管理框架。
+    * 可以选择第三方构建好的完善的平台，如 Google 的 kubernetes，Docker系的docker compose / docker swarm
+    * 也可以直接选择最基础的Docker Remote API，自己Groundup。
+
+我倾向于后者，用最基础的Docker API。
+
+* 使用etcd还是arangodb来持久化数据。
+
+我倾向于arangodb，但是前期可以考虑混合模式。
+
+* 使用JavaScript语言还是rust语言。
+
+我倾向于使用混合语言。性能敏感、底层交互、模块化使用rust，框架、业务使用JavaScript。
+
 ## 20160126 具体而微
 不能再搞宏大叙事了，扎扎实实按照逐步求精、快速迭代的模式进行开发。直接面向自己的平台应用，做到 “dogfooding”。让系统和框架在合适的时候涌现出来。
 

@@ -68,11 +68,7 @@ function wrap(object) {
 }
 
 // todo: exceptions handler or never
-function aggregate() {
-  for (var _len = arguments.length, containers = Array(_len), _key = 0; _key < _len; _key++) {
-    containers[_key] = arguments[_key];
-  }
-
+function aggregate(...containers) {
   function get(key) {
     let obj, v;
     for (obj of containers) {

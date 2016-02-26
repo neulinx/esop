@@ -31,6 +31,9 @@ test doc:
 run build:
 	cargo $@ --release
 
+devel release:
+	npm run $@
+
 docview: doc
 	xdg-open target/doc/$(PKG_NAME)/index.html
 
