@@ -2,13 +2,15 @@ PKG_NAME = sop
 TARGET = /neulinx
 SOURCE = foxx
 
-install: lib
+all: js
+
+install:
 	foxx-manager install $(SOURCE) $(TARGET)
 
-upgrade: lib
+upgrade:
 	foxx-manager upgrade $(SOURCE) $(TARGET)
 
-replace: lib
+replace:
 	foxx-manager replace $(SOURCE) $(TARGET)
 
 uninstall:
@@ -21,8 +23,9 @@ clean:
 test doc:
 	cargo $@
 
-run build:
-	cargo $@ --release
+release:
+	cd foxx && npm run release
+	cargo build --release
 
 js:
 	cd foxx && npm run compile
@@ -30,4 +33,4 @@ js:
 docview: doc
 	xdg-open target/doc/$(PKG_NAME)/index.html
 
-.PHONY: run test build doc clean docview
+.PHONY: run test build doc clean docview js release all
