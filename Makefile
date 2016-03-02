@@ -1,13 +1,6 @@
 PKG_NAME = sop
-SRC = $(wildcard es/*.js)
-LIB = $(SRC:es/%.js=foxx/lib/%.js)
 TARGET = /neulinx
 SOURCE = foxx
-
-lib: $(LIB)
-foxx/lib/%.js: es/%.js
-	@mkdir -p $(@D)
-	babel $< -o $@
 
 install: lib
 	foxx-manager install $(SOURCE) $(TARGET)
@@ -31,8 +24,8 @@ test doc:
 run build:
 	cargo $@ --release
 
-devel release:
-	npm run $@
+js:
+	cd foxx && npm run compile
 
 docview: doc
 	xdg-open target/doc/$(PKG_NAME)/index.html

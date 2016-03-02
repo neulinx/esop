@@ -27,7 +27,7 @@
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "devel": "babel --compact false es -d lib",
+    "compile": "babel --compact false es -d lib",
     "release": "babel --compact true es -d lib"
   },
   "repository": {
