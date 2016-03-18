@@ -1,6 +1,14 @@
 # 开发日志
 * * *
 
+## 20160303 高铁上
+### 
+ 
+### make & npm
+由于项目混合了 Rust、JavaScript、Dockerfile、shell脚本等等涵盖编码、测试、部署各个环节，所以需要采用一个统一的构建工具。从普适性来讲，make是不错的选择。
+
+首先是把JavaScript开发使用的npm构建工具融合到Makefile中去。npm的主要工作是把ES6转换成为JavaScript。
+
 ## 20160223 Total Platform
 时代在变化，运维研发已经融合，全面采用软件开发技术实现全平台的构建，包括部署。
 
