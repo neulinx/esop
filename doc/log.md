@@ -1,8 +1,12 @@
 # 开发日志
 * * *
 
+## 20160321 分支
+同一个develop项目维护多个不同发布的办法有两个，一个是采用submodule，另一个是采用branch。感觉还是采用branch更加简单一致些。
+
+因此，把DataEngine项目通过Branch方式引入到develop项目中。
+
 ## 20160303 高铁上
-### 
  
 ### make & npm
 由于项目混合了 Rust、JavaScript、Dockerfile、shell脚本等等涵盖编码、测试、部署各个环节，所以需要采用一个统一的构建工具。从普适性来讲，make是不错的选择。
