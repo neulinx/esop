@@ -75,9 +75,11 @@ init(State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_call(Request, From, #{command := Call} = State) ->
+    Call(Request, From, State);
+
 handle_call(_Request, _From, State) ->
-    Reply = ok,
-    {reply, Reply, State}.
+    {reply, unknown, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -89,6 +91,8 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast(Message, #{command := Cast} = State) ->
+    Cast(Message, undefined, State);
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -102,8 +106,8 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info(Info, #{handle := Handle} = State) ->
-    case Handle(Info, State) of
+handle_info(Info, #{respond := Respond} = State) ->
+    case Respond(Info, State) of
         {ok, NewState} ->
             {noreply, NewState};
         {stop, NewState} ->
