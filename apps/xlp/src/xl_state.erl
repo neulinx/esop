@@ -11,13 +11,15 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/1, start/1]).
+-export([start_link/1, start_link/2, start/1, start/2]).
+
+-export([invoke/3, invoke/4, notify/3]).
+
+-export([leave/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
-
--define(SERVER, ?MODULE).
 
 %%%===================================================================
 %%% API
@@ -31,10 +33,16 @@
 %% @end
 %%--------------------------------------------------------------------
 start_link(State) ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, State, []).
+    start_link(State, []).
+
+start_link(State, Options) ->
+    gen_server:start_link(?MODULE, State, Options).
 
 start(State) ->
-    gen_server:start({local, ?SERVER}, ?MODULE, State, []).
+    start(State, []).
+
+start(State, Options) ->
+    gen_server:start(?MODULE, State, Options).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -51,15 +59,22 @@ start(State) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init(#{entry := Entry} = State) ->
-    case Entry(State) of
-        {ok, NewState} ->
-            do_activity(NewState);
-        Error ->
-            Error
-    end;
 init(State) ->
-    do_activity(State).
+    EntryTime = erlang:system_time(),
+    case catch start_work(State) of
+        {ok, S} ->
+            NewState = S#{entry_time => EntryTime,
+                          status => running},
+            {ok, NewState};
+        {ok, S, T} ->
+            NewState = S#{entry_time => EntryTime,
+                          status => running},
+            {ok, NewState, T};
+        {stop, Reason} ->
+            terminate(Reason, State);
+        {'EXIT', Error} ->
+            exit({exception, State#{reason => Error, status => stopped}})
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -75,9 +90,13 @@ init(State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_call(Request, From, #{command := Call} = State) ->
-    Call(Request, From, State);
-
+handle_call(Request, From, #{react := React} = State) ->
+    case catch React({'$xl_command', From, Request}, State) of
+        {'EXIT', Reason} ->
+            {stop, Reason, {error, abort}, State#{status => exception}};
+        Output ->
+            Output
+    end;
 handle_call(_Request, _From, State) ->
     {reply, unknown, State}.
 
@@ -91,8 +110,14 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast(Message, #{command := Cast} = State) ->
-    Cast(Message, undefined, State);
+handle_cast(Message, #{react := React} = State) ->
+    case catch React({'$xl_notify', Message}, State) of
+        {'EXIT', Reason} ->
+            {stop, Reason, State#{status => exception}};
+        Output ->
+            Output
+    end;
+
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -106,20 +131,34 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info(Info, #{respond := Respond} = State) ->
-    case Respond(Info, State) of
-        {ok, NewState} ->
-            {noreply, NewState};
-        {stop, NewState} ->
-            Reason = maps:get(reason, NewState, normal),
-            {stop, Reason, NewState}
+handle_info(Info, #{react := React} = State) ->
+    case catch React(Info, State) of
+        {'EXIT', Reason} ->
+            {stop, Reason, State#{status => exception}};
+        {reply, Reply, S} ->
+            case Info of
+                {'$xl_command', From, _} ->
+                    gen_server:reply(From, Reply),
+                    {noreply, S};
+                _ ->
+                    {noreply, S}
+            end;
+        {reply, Reply, S, T} ->
+            case Info of
+                {'$xl_command', From, _} ->
+                    gen_server:reply(From, Reply),
+                    {noreply, S, T};
+                _ ->
+                    {noreply, S, T}
+            end;
+        Output ->
+            Output
     end;
 %% worker is existed
 handle_info({'EXIT', From, Reason}, #{worker := From} = State) ->
     {stop, Reason, State};
 handle_info(_Info, State) ->
     {noreply, State}.  % todo: add hibernate parameter for state without handle.
-
 
 %%--------------------------------------------------------------------
 %% @private
@@ -132,11 +171,17 @@ handle_info(_Info, State) ->
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
-terminate(Reason, #{exit := Exit} = State) ->
-    NewState = kill_worker(Reason, State),
-    Exit(Reason, NewState);
-terminate(_Reason, _State) ->
-    ok.
+terminate(Reason, State) ->
+    S1 = State#{reason => Reason},
+    S2 = case catch stop_work(S1) of
+             {'EXIT', _} ->
+                 S1;
+             {_, NewS} ->
+                 NewS
+         end,
+    {Directive, S3} = leave(S2),
+    FinalState = S3#{exit_time => erlang:system_time(), status = stopped},
+    exit({Directive, FinalState}).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -149,31 +194,84 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
+invoke(Pid, Command, State) ->
+    invoke(Pid, Command, State, infinity).
+
+invoke(Pid, Command, State, 0) ->
+    Pid ! {{'$xl_notify', Command}, State},
+    ok;
+invoke(Pid, Command, State, Timeout) ->
+    Tag = make_ref(),
+    Pid ! {{'$xl_command', {self(), Tag}, Command}, State},
+    receive
+        {Tag, Output} ->
+            Output;
+        {'EXIT', Pid, Output} ->
+            Output
+    after
+        Timeout ->
+            {timeout, State}
+    end.
+
+notify(Pid, Message, State) ->
+    invoke(Pid, Message, State, 0).
+
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+start_work(#{entry := Entry} = State) ->
+    case Entry(State) of
+        {ok, NewState} ->
+            do_activity(NewState);
+        Error ->
+            Error
+    end;
+start_work(State) ->
+    do_activity(State).
+
 do_activity(#{do := Do} = State) ->
-    case maps:get(do_mode, State) of
-        takeover ->
+    case maps:get(work_mode, State) of
+        takeover ->  % redefine xl_state behaviors.
             gen_server:enter_loop(Do, [], State);
-        block ->
+        block ->  % mention the timeout of gen_server response.
             Do(State);
         _standalone ->
             erlang:process_flag(trap_exit, true),
+            %% worker can not alert state directly.
             Worker = spawn_link(fun() -> Do(State) end),
             {ok, State#{worker => Worker}}
     end;
 do_activity(State) ->
     {ok, State}.
 
-%% This function is not necessary now, just a placeholder for graceful close.
-kill_worker(_Reason, #{worker := Worker} = State) ->
+stop_work(#{worker := Worker} = State) ->
     case is_process_alive(Worker) of
-        true ->
-            exit(Worker, kill),
-            State;
+        true->
+            Timeout = maps:get(timeout, State, infinity),
+            case invoke(Worker, stop, State, Timeout) of
+                {timeout, State} = Output ->
+                    exit(Worker, kill),
+                    Output;
+                Output ->  % worker return the output by reason field.
+                    Output  % {stopping, State#{reason := Workout}}.
+            end;
         false ->
-            State
+            {stopped, State}
     end;
-kill_worker(_Reason, State) ->
-    State.
+stop_work(State) ->
+    {ok, State}.
+
+leave(#{exit := Exit} = State) ->
+    case catch Exit(State) of
+        {'EXIT', _} ->
+            {exception, State};
+        Output ->
+            Output
+    end;
+leave(State#{status := exception}) ->
+    {exception, State};
+leave(State#{directive := Directive}) ->
+    {Directive, State};
+leave(State) ->
+    {stopped, State}.
+
