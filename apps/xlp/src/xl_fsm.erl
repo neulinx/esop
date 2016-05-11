@@ -198,3 +198,16 @@ stop_1(#{state := State} = Fsm, Reason) ->
     {stopped, Fsm#{state => FinalState, sign => Sign}};
 stop_1(Fsm, _) ->
     {stopped, Fsm}.
+
+archive(#{trace := Trace} = Fsm) when is_function(Trace) ->
+    Trace(Fsm);
+archive(#{state := State} = Fsm)  ->
+    Trace = maps:get(trace, Fsm, []),
+    Limit = maps:get(max_trace, Fsm, infinity),
+    NewTrace = [State | Trace],
+    if
+        length(NewTrace) > Limit ->
+            Fsm#{trace => lists:droplast(NewTrace)};
+        true ->
+            Fsm#{trace => NewTrace}
+    end.
