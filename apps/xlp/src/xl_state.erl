@@ -198,7 +198,7 @@ leave(State, Reason) ->
                  S1#{output => Workout}
          end,
     {Sign, S3} = try_exit(S2),
-    FinalState = S3#{exit_time => erlang:system_time(), status = stopped},
+    FinalState = S3#{exit_time => erlang:system_time(), status => stopped},
     {Sign, FinalState}.
 
 %%--------------------------------------------------------------------
@@ -276,7 +276,7 @@ do_activity(#{do := Do} = State) ->
 do_activity(State) ->
     {ok, State}.
 
-stop_work(#{worker := Worker}, Reason) ->
+stop_work(#{worker := Worker} = State, Reason) ->
     case is_process_alive(Worker) of
         true->
             Timeout = maps:get(timeout, State, infinity),
@@ -284,7 +284,7 @@ stop_work(#{worker := Worker}, Reason) ->
         false ->
             stopped
     end;
-stop_work(State) ->
+stop_work(State, _) ->
     stopped.
 
 try_exit(#{exit := Exit} = State) ->

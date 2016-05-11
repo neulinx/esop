@@ -8,7 +8,7 @@
 %%%-------------------------------------------------------------------
 -module(xl_fsm).
 
--compile({no_auto_import,[exit/1]})
+-compile({no_auto_import,[exit/1]}).
 %% API
 -export([entry/1, react/2, exit/1]).
 
@@ -44,8 +44,8 @@ next(#{states := States}, Sign) ->
 
 next(States, From, Sign) when is_function(States) ->
     States(From, Sign);
-next(#{{From, Sign} := To}, From, Sign) ->
-    To.
+next(States, From, Sign) ->
+    maps:get({From, Sign}, States).
 
 process({'$xl_command', _, _} = Command, Fsm) ->
     on_command(Fsm, Command);
@@ -58,7 +58,7 @@ relay(Message, #{state := State} = Fsm) ->
     relay(Message, State, Fsm).
 
 relay(Message, #{react := React} = State, Fsm) ->
-    case react(Message, State) of
+    case React(Message, State) of
         {reply, R, S} ->
             {reply, R, Fsm#{state := S}};
         {reply, R, S, T} ->
@@ -84,7 +84,7 @@ relay(Message, #{react := React} = State, Fsm) ->
                     {stop, R, Reply, NewFsm};
                 Stop ->
                     Stop
-            end;
+            end
     end;
 relay(_, _, Fsm) ->
     {noreply, Fsm}.
@@ -138,18 +138,18 @@ pre_transfer(Fsm, Sign) ->
         {ok, next(Fsm, Sign), Fsm}
     catch
         error: _BadKey when Sign =:= exception ->
-            {stop, no_such_state, F1};
+            {stop, no_such_state, Fsm};
         error: _BadKey when Sign =:= stop ->
-            {stop, normal, F1};
+            {stop, normal, Fsm};
         error: _BadKey ->
-            transfer(F1, exception)
+            transfer(Fsm, exception)
     end.
 
 post_transfer({stop, _, _} = Stop) ->
     Stop;
 post_transfer({ok, NewState, Fsm}) ->
     F1 = archive(Fsm),
-    F2 = F1#{state = NewState},
+    F2 = F1#{state => NewState},
     case maps:get(engine, F2, reuse) of
         standalone ->
             erlang:process_flag(trap_exit, true),
@@ -189,7 +189,7 @@ stop_1(#{engine := standalone, state_pid := Pid} = Fsm, Reason) ->
                     {timeout, Fsm#{status := exception}};
                 {Sign, FinalState} ->
                     {stopped, Fsm#{state => FinalState, sign => Sign}}
-            end
+            end;
         false ->
             {stopped, Fsm}
     end;
