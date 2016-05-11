@@ -21,50 +21,31 @@
 %% @spec
 %% @end
 %%--------------------------------------------------------------------
-entry(#{steps := Steps, max_steps := MaxSteps}) when Steps >= MaxSteps ->
-    {stop, out_of_steps};
 entry(Fsm) ->
-    StartState = next(Fsm, start),
-    Step = maps:get(step, Fsm, 0),
-    Fsm1 = Fsm#{state = StartState, step => Step + 1},
-    Fsm2 = case maps:get(engine, Fsm1, reuse) of
-               standalone ->
-                   erlang:process_flag(trap_exit, true),
-                   Pid = xl_state:start_link(State),
-                   Fsm1#{state_pid => Pid};
-               _Reuse ->
-                   case maps:get(entry, StartState, undefined) of
-                       StateEntry ->
-                           StateEntry(StartState);
-                       undefined ->
-                   end,
-                   transfer(Fsm1)  % todo transfer
-           end,
-    {ok, Fsm2}.
+    transfer(Fsm, start).
 
 react(Message, Fsm) ->
-    case process(Message, Fsm) of
-        noop ->
-            proxy(Message, Fsm);
-        Output ->
-            Output
-    end.
+    process(Message, Fsm).
+
+exit(Fsm) ->
+    Reason = maps:get(reason, Fsm, normal),
+    stop_fsm(Fsm, Reason).
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
 next(#{state := State}, start) ->
     State;
-next(#{state := State, states := States}, Directive) ->
+next(#{state := State, states := States}, Sign) ->
     Name = maps:get(state_name, State),
-    next(States, Name, Directive);
-next(#{states := States}, Directive) ->
-    next(States, '$root', Directive).
+    next(States, Name, Sign);
+next(#{states := States}, Sign) ->
+    next(States, '$root', Sign).
 
-next(States, From, Directive) when is_function(States) ->
-    States(From, Directive);
-next(#{{From, Directive} := To}, From, Directive) ->
-    To.    
+next(States, From, Sign) when is_function(States) ->
+    States(From, Sign);
+next(#{{From, Sign} := To}, From, Sign) ->
+    To.
 
 process({'$xl_command', _, _} = Command, Fsm) ->
     on_command(Fsm, Command);
@@ -73,10 +54,10 @@ process({'$xl_notify', _} = Notification, Fsm) ->
 process(Message, Fsm) ->
     on_message(Fsm, Message).
 
-proxy(Message, #{state := State} = Fsm) ->
-    proxy(Message, State, Fsm).
+relay(Message, #{state := State} = Fsm) ->
+    relay(Message, State, Fsm).
 
-proxy(Message, #{react := React} = State, Fsm) ->
+relay(Message, #{react := React} = State, Fsm) ->
     case react(Message, State) of
         {reply, R, S} ->
             {reply, R, Fsm#{state := S}};
@@ -87,16 +68,16 @@ proxy(Message, #{react := React} = State, Fsm) ->
         {noreply, S, T} ->
             {noreply, Fsm#{state := S}, T};
         {stop, Reason, S} ->
-            {Directive, S1} = xl_state:leave(S#{reason := Reason}),
-            case transfer(Fsm, S1, Directive) of
+            {Sign, S1} = xl_state:leave(S, Reason),
+            case transfer(Fsm#{state := S1}, Sign) of
                 {ok, NewFsm} ->
                     {noreply, NewFsm};
                 Stop ->
                     Stop
             end;
         {stop, Reason, Reply, S} ->
-            {Directive, S1} = xl_state:leave(S#{reason => Reason}),
-            case transfer(Fsm, S1, Directive) of
+            {Sign, S1} = xl_state:leave(S, Reason),
+            case transfer(Fsm#{state := S1}, Sign) of
                 {ok, NewFsm} ->
                     {reply, Reply, NewFsm};
                 {stop, R, NewFsm} ->
@@ -105,53 +86,115 @@ proxy(Message, #{react := React} = State, Fsm) ->
                     Stop
             end;
     end;
-proxy(_, Fsm) ->
+relay(_, _, Fsm) ->
     {noreply, Fsm}.
 
-on_command(Fsm, {_, stop, _}) ->
-    stop_fsm(Fsm, command);
-on_command(Fsm, {_, {stop, Reason}, _}) ->
-    stop_fsm(Reason, Fsm);
-%    {stop, Reason, Reply, Fsm1};
-on_command(#{engine := standalone, state_pid := Pid} = Fsm, Command) ->
+on_command(Fsm, {_, _, stop}) ->
+    {Reply, Fsm1} = stop_fsm(Fsm, command),
+    {stop, command, Reply, Fsm1};
+on_command(Fsm, {_, _, {stop, Reason}}) ->
+    {Reply, Fsm1} = stop_fsm(Fsm, Reason),
+    {stop, Reason, Reply, Fsm1};
+on_command(#{engine := standalone,
+             status := running,
+             state_pid := Pid
+            } = Fsm, Command) ->
     Timeout = maps:get(timeout, Fsm, infinity),
     Result = gen_server:call(Pid, Command, Timeout),
     {reply, Result, Fsm};  % notice: timeout exception
-on_command(_Fsm, _Command, _From) ->
-    noop.
+on_command(#{status := running} = Fsm, Command) ->
+    relay(Fsm, Command);
+on_command(Fsm, _Command) ->
+    {reply, unknown, Fsm}.
 
 on_notify(#{engine := standalone, state_pid := Pid} = Fsm, Notification) ->
     ok = gen_server:cast(Pid, Notification),
     {noreply, Fsm};
-on_notify(_, _) ->
-    noop.
+on_notify(#{status := running} = Fsm, Notification) ->
+    relay(Fsm, Notification);
+on_notify(Fsm, _) ->
+    {noreply, Fsm}.
 
 on_message(#{state_pid := Pid} = Fsm, {'EXIT', Pid, {D, S}}) ->
-    transfer(Fsm, S, D);
+    transfer(Fsm#{state := S}, D);
 on_message(#{engine := standalone, state_pid := Pid} = Fsm, Message) ->
     Pid ! Message,
     {noreply, Fsm};
-on_message(_, _) ->
-    noop.
+on_message(#{status := running} = Fsm, Message) ->
+    relay(Fsm, Message);
+on_message(Fsm, _) ->
+    {noreply, Fsm}.
 
-transfer(#{steps := Steps, max_steps := MaxSteps}) when Steps >= MaxSteps ->
-    {stop, out_of_steps};
-transfer(Fsm) ->
-    StartState = next(Fsm, start),
+transfer(Fsm, Sign) ->
     Step = maps:get(step, Fsm, 0),
-    Fsm1 = Fsm#{state = StartState, step => Step + 1},
-    Fsm2 = case maps:get(engine, Fsm1, reuse) of
-               standalone ->
-                   erlang:process_flag(trap_exit, true),
-                   Pid = xl_state:start_link(State),
-                   Fsm1#{state_pid => Pid};
-               _Reuse ->
-                   case maps:get(entry, StartState, undefined) of
-                       StateEntry ->
-                           StateEntry(StartState);
-                       undefined ->
-                   end,
-                   transfer(Fsm1)  % todo transfer
-           end,
-    {ok, Fsm2}.
+    F1 = Fsm#{step => Step + 1},
+    post_transfer(pre_transfer(F1, Sign)).
 
+pre_transfer(#{steps := Steps, max_steps := MaxSteps} = Fsm, _)
+  when Steps >= MaxSteps ->
+    pre_transfer(Fsm#{reason => out_of_steps}, exception);
+pre_transfer(Fsm, Sign) ->
+    try
+        {ok, next(Fsm, Sign), Fsm}
+    catch
+        error: _BadKey when Sign =:= exception ->
+            {stop, no_such_state, F1};
+        error: _BadKey when Sign =:= stop ->
+            {stop, normal, F1};
+        error: _BadKey ->
+            transfer(F1, exception)
+    end.
+
+post_transfer({stop, _, _} = Stop) ->
+    Stop;
+post_transfer({ok, NewState, Fsm}) ->
+    F1 = archive(Fsm),
+    F2 = F1#{state = NewState},
+    case maps:get(engine, F2, reuse) of
+        standalone ->
+            erlang:process_flag(trap_exit, true),
+            Pid = xl_state:start_link(NewState),
+            {ok, F2#{state_pid => Pid}};
+        _Reuse ->
+            case xl_state:enter(NewState) of
+                {ok, State} ->
+                    {ok, F2#{state => State}};
+                {ok, State, T} ->
+                    {ok, F2#{state => State}, T};
+                {Sign, ErrState} ->
+                    transfer(F2#{state => ErrState}, Sign)
+            end
+    end.
+
+stop_fsm(#{status := running} = Fsm, Reason) ->
+    case stop_1(Fsm, Reason) of
+        {Sign, #{status := running} = Fsm1} ->
+            {Sign, Fsm1#{status := stopped}};
+        Result ->
+            Result
+    end;
+stop_fsm(#{status := exception} = Fsm, _) ->
+    {exception, Fsm};
+stop_fsm(#{sign := Sign} = Fsm, _) ->
+    {Sign, Fsm};
+stop_fsm(Fsm, _) ->
+    {stopped, Fsm}.
+
+stop_1(#{engine := standalone, state_pid := Pid} = Fsm, Reason) ->
+    case is_process_alive(Pid) of
+        true->
+            Timeout = maps:get(timeout, Fsm, infinity),
+            case catch xl_state:deactivate(Pid, Reason, Timeout) of
+                {'EXIT', timeout} ->
+                    {timeout, Fsm#{status := exception}};
+                {Sign, FinalState} ->
+                    {stopped, Fsm#{state => FinalState, sign => Sign}}
+            end
+        false ->
+            {stopped, Fsm}
+    end;
+stop_1(#{state := State} = Fsm, Reason) ->
+    {Sign, FinalState} = xl_state:leave(State, Reason),
+    {stopped, Fsm#{state => FinalState, sign => Sign}};
+stop_1(Fsm, _) ->
+    {stopped, Fsm}.
