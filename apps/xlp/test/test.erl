@@ -36,7 +36,7 @@ simple_state_test() ->
     ?assertMatch(#{output := "Hello world!"}, Final),
     ?assert(Sign =:= s2).
 
-simple_fsm_test() ->
+create_fsm() ->
     S1 = #{state_name => state1,
            react => fun s_react/2,
            entry => fun s1_entry/1},
@@ -48,9 +48,14 @@ simple_fsm_test() ->
                {state1, s2} => S2,
                {state2, s1} => S1,
                {state2, s2} => S2},
-    Fsm = xl_fsm:create([{states, States}]),
+    xl_fsm:create([{states, States}]).
+    
+fsm_reuse_test() ->
+    Fsm = create_fsm(),
     %% reuse fsm process, is default.
-    fsm_test_cases(Fsm),
+    fsm_test_cases(Fsm).
+fsm_standalone_test() ->
+    Fsm = create_fsm(),
     %% standalone process for each state.
     Fsm1 = Fsm#{engine => standalone},
     fsm_test_cases(Fsm1).
