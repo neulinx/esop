@@ -10,11 +10,23 @@
 
 -compile({no_auto_import,[exit/1]}).
 %% API
+-export([create/1]).
 -export([entry/1, react/2, exit/1]).
+
+-ifdef(TEST).
+    -include_lib("eunit/include/eunit.hrl").
+-endif.
 
 %%%===================================================================
 %%% API
 %%%===================================================================
+create(Data) when is_map(Data) ->
+    Data#{entry => fun ?MODULE:entry/1,
+          exit => fun ?MODULE:exit/1,
+          react => fun ?MODULE:react/2
+         };
+create(Data) when is_list(Data) ->
+    create(maps:from_list(Data)).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -22,6 +34,7 @@
 %% @end
 %%--------------------------------------------------------------------
 entry(Fsm) ->
+    erlang:process_flag(trap_exit, true),
     transfer(Fsm, start).
 
 react(Message, Fsm) ->
@@ -48,14 +61,19 @@ next(States, From, Sign) ->
     maps:get({From, Sign}, States).
 
 process({'$xl_command', _, _} = Command, Fsm) ->
-    on_command(Fsm, Command);
+    on_command(Command, Fsm);
 process({'$xl_notify', _} = Notification, Fsm) ->
-    on_notify(Fsm, Notification);
+    on_notify(Notification, Fsm);
 process(Message, Fsm) ->
-    on_message(Fsm, Message).
+    on_message(Message, Fsm).
 
-relay(Message, #{state := State} = Fsm) ->
-    relay(Message, State, Fsm).
+relay(Message, #{state := State, status := running} = Fsm) ->
+    relay(Message, State, Fsm);
+relay({'$xl_command', _, _}, Fsm) ->
+    {reply, not_ready, Fsm};
+relay(_, Fsm) ->
+    {noreply, Fsm}.
+
 
 relay(Message, #{react := React} = State, Fsm) ->
     case React(Message, State) of
@@ -89,40 +107,47 @@ relay(Message, #{react := React} = State, Fsm) ->
 relay(_, _, Fsm) ->
     {noreply, Fsm}.
 
-on_command(Fsm, {_, _, stop}) ->
+on_command({_, _, stop}, Fsm) ->
     {Reply, Fsm1} = stop_fsm(Fsm, command),
     {stop, command, Reply, Fsm1};
-on_command(Fsm, {_, _, {stop, Reason}}) ->
+on_command({_, _, {stop, Reason}}, Fsm) ->
     {Reply, Fsm1} = stop_fsm(Fsm, Reason),
     {stop, Reason, Reply, Fsm1};
-on_command(#{engine := standalone,
+on_command({_, _, Command},
+           #{engine := standalone,
              status := running,
              state_pid := Pid
-            } = Fsm, Command) ->
+            } = Fsm) ->
     Timeout = maps:get(timeout, Fsm, infinity),
-    Result = gen_server:call(Pid, Command, Timeout),
+    Result = xl_state:invoke(Pid, Command, Timeout),
     {reply, Result, Fsm};  % notice: timeout exception
-on_command(#{status := running} = Fsm, Command) ->
-    relay(Fsm, Command);
-on_command(Fsm, _Command) ->
+on_command(Command, #{status := running} = Fsm) ->
+    relay(Command, Fsm);
+on_command(_, Fsm) ->
     {reply, unknown, Fsm}.
 
-on_notify(#{engine := standalone, state_pid := Pid} = Fsm, Notification) ->
-    ok = gen_server:cast(Pid, Notification),
+on_notify({_, Info}, #{engine := standalone, state_pid := Pid} = Fsm) ->
+    ok = gen_server:cast(Pid, Info),
     {noreply, Fsm};
-on_notify(#{status := running} = Fsm, Notification) ->
-    relay(Fsm, Notification);
-on_notify(Fsm, _) ->
+on_notify(Notification, #{status := running} = Fsm) ->
+    relay(Notification, Fsm);
+on_notify(_, Fsm) ->
     {noreply, Fsm}.
 
-on_message(#{state_pid := Pid} = Fsm, {'EXIT', Pid, {D, S}}) ->
-    transfer(Fsm#{state := S}, D);
-on_message(#{engine := standalone, state_pid := Pid} = Fsm, Message) ->
+on_message({'EXIT', Pid, {D, S}}, #{state_pid := Pid} = Fsm) ->
+    case transfer(Fsm#{state := S}, D) of 
+        {ok, Fsm1} ->
+            {noreply, Fsm1};
+        Stop ->
+            Stop
+    end;
+on_message(Message, #{engine := standalone, state_pid := Pid} = Fsm) ->
+    ?debugVal({Pid, Message}),
     Pid ! Message,
     {noreply, Fsm};
-on_message(#{status := running} = Fsm, Message) ->
-    relay(Fsm, Message);
-on_message(Fsm, _) ->
+on_message(Message, #{status := running} = Fsm) ->
+    relay(Message, Fsm);
+on_message(_, Fsm) ->
     {noreply, Fsm}.
 
 transfer(Fsm, Sign) ->
@@ -152,8 +177,7 @@ post_transfer({ok, NewState, Fsm}) ->
     F2 = F1#{state => NewState},
     case maps:get(engine, F2, reuse) of
         standalone ->
-            erlang:process_flag(trap_exit, true),
-            Pid = xl_state:start_link(NewState),
+            {ok, Pid} = xl_state:start_link(NewState),
             {ok, F2#{state_pid => Pid}};
         _Reuse ->
             case xl_state:enter(NewState) of
@@ -188,14 +212,14 @@ stop_1(#{engine := standalone, state_pid := Pid} = Fsm, Reason) ->
                 {'EXIT', timeout} ->
                     {timeout, Fsm#{status := exception}};
                 {Sign, FinalState} ->
-                    {stopped, Fsm#{state => FinalState, sign => Sign}}
+                    {Sign, Fsm#{state => FinalState, sign => Sign}}
             end;
         false ->
             {stopped, Fsm}
     end;
 stop_1(#{state := State} = Fsm, Reason) ->
     {Sign, FinalState} = xl_state:leave(State, Reason),
-    {stopped, Fsm#{state => FinalState, sign => Sign}};
+    {Sign, Fsm#{state => FinalState, sign => Sign}};
 stop_1(Fsm, _) ->
     {stopped, Fsm}.
 
@@ -210,4 +234,6 @@ archive(#{state := State} = Fsm)  ->
             Fsm#{trace => lists:droplast(NewTrace)};
         true ->
             Fsm#{trace => NewTrace}
-    end.
+    end;
+archive(Fsm) ->
+    Fsm.

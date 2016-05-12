@@ -8,6 +8,10 @@
 %%%-------------------------------------------------------------------
 -module(xl_state).
 
+-ifdef(TEST).
+    -include_lib("eunit/include/eunit.hrl").
+-endif.
+
 -behaviour(gen_server).
 
 %% API
@@ -190,7 +194,7 @@ leave(State) ->
     leave(State, normal).
 
 leave(State, Reason) ->
-    S1 = State#{reason := Reason},
+    S1 = State#{reason => Reason},
     S2 = case catch stop_work(S1, Reason) of
              stopped ->
                  S1;
@@ -241,7 +245,7 @@ deactivate(Pid, Reason) ->
 deactivate(Pid, Reason, Timeout) ->
     notify(Pid, {stop, Reason}),
     receive
-        {'EXIT', Result} ->
+        {'EXIT', Pid, Result} ->
             Result
     after
         Timeout ->
@@ -284,7 +288,7 @@ stop_work(#{worker := Worker} = State, Reason) ->
         false ->
             stopped
     end;
-stop_work(State, _) ->
+stop_work(_, _) ->
     stopped.
 
 try_exit(#{exit := Exit} = State) ->
