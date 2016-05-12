@@ -124,6 +124,8 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast({stop, Reason}, State) ->
+    {stop, Reason, State};
 handle_cast(Message, #{react := React} = State) ->
     case catch React({'$xl_notify', Message}, State) of
         {'EXIT', Reason} ->
@@ -145,6 +147,8 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_info({'$xl_notify', {stop, Reason}}, State) ->
+    {stop, Reason, State};
 handle_info(Info, #{react := React} = State) ->
     case catch React(Info, State) of
         {'EXIT', Reason} ->

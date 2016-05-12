@@ -22,9 +22,7 @@ s_react(transfer, S) ->
 s_react({'$xl_command', _, {get, state}}, S) ->
     {reply, maps:get(state_name, S), S};
 s_react({'$xl_notify', {transfer, Next}}, S) ->
-    {stop, transfer, S#{sign => Next}};
-s_react({'$xl_notify', {stop, Reason}}, S) ->
-    {stop, Reason, S}.
+    {stop, transfer, S#{sign => Next}}.
 
 
 simple_state_test() ->
@@ -36,7 +34,7 @@ simple_state_test() ->
     ?assertMatch(#{output := "Hello world!"}, Final),
     ?assert(Sign =:= s2).
 
-create_fsm() ->
+create_fsm() -> 
     S1 = #{state_name => state1,
            react => fun s_react/2,
            entry => fun s1_entry/1},
@@ -61,7 +59,8 @@ fsm_standalone_test() ->
     fsm_test_cases(Fsm1).
 
 fsm_test_cases(Fsm) ->
-    {ok, Pid} = xl_state:start(Fsm),
+    erlang:process_flag(trap_exit, true),
+    {ok, Pid} = xl_state:start_link(Fsm),
     ?assert(state1 =:= xl_state:invoke(Pid, {get, state})),
     Pid ! transfer,
     timer:sleep(10),
@@ -69,5 +68,5 @@ fsm_test_cases(Fsm) ->
     gen_server:cast(Pid, {transfer, s1}),
     timer:sleep(10),
     ?assert(state1 =:= xl_state:invoke(Pid, {get, state})),
-    {'EXIT', {s2, Final}} = (catch gen_server:stop(Pid)),
+    {s2, Final} = xl_state:deactivate(Pid),
     ?assertMatch(#{step := 3, status := stopped}, Final).
