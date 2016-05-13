@@ -1,9 +1,13 @@
-xlp
+esop
 =====
 
-An OTP application
+State-oriented programming framework for Erlang/OTP.
 
 Build
 -----
 
-    $ rebar3 compile
+    $ make
+    
+Unit Test
+-----
+    $ make test

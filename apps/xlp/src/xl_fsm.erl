@@ -142,7 +142,6 @@ on_message({'EXIT', Pid, {D, S}}, #{state_pid := Pid} = Fsm) ->
             Stop
     end;
 on_message(Message, #{engine := standalone, state_pid := Pid} = Fsm) ->
-    ?debugVal({Pid, Message}),
     Pid ! Message,
     {noreply, Fsm};
 on_message(Message, #{status := running} = Fsm) ->
