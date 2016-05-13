@@ -1,8 +1,7 @@
-{application, xlp,
- [{description, "An OTP application"},
+{application, xl_sop,
+ [{description, "State-oriented programming framework."},
   {vsn, "0.1.0"},
   {registered, []},
-  {mod, { xlp_app, []}},
   {applications,
    [kernel,
     stdlib

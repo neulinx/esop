@@ -1,4 +1,4 @@
-esop
+xl_sop
 =====
 
 State-oriented programming framework for Erlang/OTP.
