@@ -114,7 +114,7 @@ on_command({_, _, {stop, Reason}}, Fsm) ->
     {Reply, Fsm1} = stop_fsm(Fsm, Reason),
     {stop, Reason, Reply, Fsm1};
 on_command({_, _, Command},
-           #{engine := standalone,
+           #{state_mode := standalone,
              status := running,
              state_pid := Pid
             } = Fsm) ->
@@ -126,7 +126,7 @@ on_command(Command, #{status := running} = Fsm) ->
 on_command(_, Fsm) ->
     {reply, unknown, Fsm}.
 
-on_notify({_, Info}, #{engine := standalone, state_pid := Pid} = Fsm) ->
+on_notify({_, Info}, #{state_mode := standalone, state_pid := Pid} = Fsm) ->
     ok = gen_server:cast(Pid, Info),
     {noreply, Fsm};
 on_notify(Notification, #{status := running} = Fsm) ->
@@ -141,7 +141,7 @@ on_message({'EXIT', Pid, {D, S}}, #{state_pid := Pid} = Fsm) ->
         Stop ->
             Stop
     end;
-on_message(Message, #{engine := standalone, state_pid := Pid} = Fsm) ->
+on_message(Message, #{state_mode := standalone, state_pid := Pid} = Fsm) ->
     Pid ! Message,
     {noreply, Fsm};
 on_message(Message, #{status := running} = Fsm) ->
@@ -173,11 +173,11 @@ post_transfer({stop, _, _} = Stop) ->
     Stop;
 post_transfer({ok, NewState, Fsm}) ->
     F1 = archive(Fsm),
-    F2 = F1#{state => NewState},
-    case maps:get(engine, F2, reuse) of
+    F2 = F1#{state => NewState, state_mode => reuse},
+    case engine_mode(F2) of
         standalone ->
             {ok, Pid} = xl_state:start_link(NewState),
-            {ok, F2#{state_pid => Pid}};
+            {ok, F2#{state_pid => Pid, state_mode => standalone}};
         _Reuse ->
             case xl_state:enter(NewState) of
                 {ok, State} ->
@@ -188,6 +188,13 @@ post_transfer({ok, NewState, Fsm}) ->
                     transfer(F2#{state => ErrState}, Sign)
             end
     end.
+    
+engine_mode(#{state := #{engine := Mode}}) ->
+    Mode;
+engine_mode(#{engine := Mode}) ->
+    Mode;
+engine_mode(_) ->
+    reuse.
 
 stop_fsm(#{status := running} = Fsm, Reason) ->
     case stop_1(Fsm, Reason) of
@@ -203,7 +210,7 @@ stop_fsm(#{sign := Sign} = Fsm, _) ->
 stop_fsm(Fsm, _) ->
     {stopped, Fsm}.
 
-stop_1(#{engine := standalone, state_pid := Pid} = Fsm, Reason) ->
+stop_1(#{state_mode := standalone, state_pid := Pid} = Fsm, Reason) ->
     case is_process_alive(Pid) of
         true->
             Timeout = maps:get(timeout, Fsm, infinity),
