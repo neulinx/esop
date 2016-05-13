@@ -176,8 +176,12 @@ post_transfer({ok, NewState, Fsm}) ->
     F2 = F1#{state => NewState, state_mode => reuse},
     case engine_mode(F2) of
         standalone ->
-            {ok, Pid} = xl_state:start_link(NewState),
-            {ok, F2#{state_pid => Pid, state_mode => standalone}};
+            case xl_state:start_link(NewState) of
+                {ok, Pid} ->
+                    {ok, F2#{state_pid => Pid, state_mode => standalone}};
+                {error, {Sign, State}} ->
+                    transfer(F2#{state => State}, Sign)
+            end;
         _Reuse ->
             case xl_state:enter(NewState) of
                 {ok, State} ->
