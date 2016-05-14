@@ -174,7 +174,7 @@ handle_info(Info, #{react := React} = State) ->
     end;
 %% worker is existed
 handle_info({'EXIT', From, Reason}, #{worker := From} = State) ->
-    {stop, Reason, State};
+    {stop, Reason, State#{output => Reason}};
 handle_info(_Info, State) ->
     {noreply, State}.  % todo: add hibernate parameter for state without handle.
 
