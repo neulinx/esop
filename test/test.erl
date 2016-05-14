@@ -17,14 +17,17 @@ s2_entry(S) ->
     S1 = S#{output => "State 2", sign => s1},
     {ok, S1}.
     
-work_fast(S) ->
+work_now(S) ->
     {stop, done, S#{output => pi}}.
     
 work_slowly(_S) ->
     receive
-        {'$xl_notify', {stop, Reason}} ->
+        {'$xl_notify', {stop, _Reason}} ->
             exit(pi)
     end.
+
+work_fast(_S) ->
+    exit(pi).
 
 s_react(transfer, S) ->
     {stop, transfer, S};
@@ -54,11 +57,16 @@ create_fsm() ->
            entry => fun s2_entry/1},
     S3 = #{state_name => state3,
            work_mode => block,
-           do => fun work_fast/1,
+           do => fun work_now/1,
            react => fun s_react/2,
            entry => fun s1_entry/1},
     S4 = #{state_name => state4,
+           engine => reuse,
            do => fun work_slowly/1,
+           react => fun s_react/2,
+           entry => fun s2_entry/1},
+    S5 = #{state_name => state5,
+           do => fun work_fast/1,
            react => fun s_react/2,
            entry => fun s2_entry/1},
     States = #{{'$root', start} => S1,
@@ -71,9 +79,12 @@ create_fsm() ->
                {state3, s1} => S1,
                {state3, s2} => S2,
                {state3, s4} => S4,
-               {state4, s1} => S1,
+               {state4, s5} => S5,
                {state4, s2} => S2,
-               {state4, s3} => S3},
+               {state4, s3} => S3,
+               {state5, s1} => S1,
+               {state5, s2} => S2,
+               {state5, s3} => S3},
     xl_fsm:create([{states, States}]).
     
 fsm_reuse_test() ->
@@ -96,9 +107,12 @@ fsm_test_cases(Fsm) ->
     gen_server:cast(Pid, {transfer, s4}),
     timer:sleep(10),
     ?assert(state4 =:= xl_state:invoke(Pid, {get, state})),
+    gen_server:cast(Pid, {transfer, s5}),
+    timer:sleep(10),
+    ?assert(state5 =:= xl_state:invoke(Pid, {get, state})),
     gen_server:cast(Pid, {transfer, s3}),
     timer:sleep(10),
     ?assert(state2 =:= xl_state:invoke(Pid, {get, state})),
     {s1, Final} = xl_state:deactivate(Pid),
-    ?assertMatch(#{step := 5, status := stopped}, Final).
+    ?assertMatch(#{step := 6, status := stopped}, Final).
 %    xl_state:deactivate(Pid).
