@@ -94,7 +94,7 @@ fsm_reuse_test() ->
 fsm_standalone_test() ->
     Fsm = create_fsm(),
     %% standalone process for each state.
-    Fsm1 = Fsm#{engine => standalone},
+    Fsm1 = Fsm#{engine => standalone, max_trace => 3},
     fsm_test_cases(Fsm1).
 
 fsm_test_cases(Fsm) ->
@@ -114,5 +114,12 @@ fsm_test_cases(Fsm) ->
     timer:sleep(10),
     ?assert(state2 =:= xl_state:invoke(Pid, {get, state})),
     {s1, Final} = xl_state:deactivate(Pid),
-    ?assertMatch(#{step := 6, status := stopped}, Final).
+    ?assertMatch(#{step := 6, status := stopped}, Final),
+    #{trace := Trace, step := Step} = Final,
+    case maps:get(max_trace, Final, infinity) of
+        infinity ->
+            ?assert(Step - 1 =:= length(Trace));
+        MaxTrace ->
+            ?assert(MaxTrace =:= length(Trace))
+        end.
 %    xl_state:deactivate(Pid).
