@@ -61,6 +61,10 @@ start(State, Options) ->
 %%                     {ok, State, Timeout} |
 %%                     ignore |
 %%                     {stop, Reason}
+%%  entry(State) ->
+%%                  {ok, State} |
+%%                  {ok, Output, State} |
+%%                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
 init(State) ->
@@ -68,8 +72,6 @@ init(State) ->
         {'EXIT', Error} ->
             exit({exception, State#{reason := Error}});
         {ok, _} = Ok ->
-            Ok;
-        {ok, _, _} = Ok ->
             Ok;
         Result ->
             {stop, Result}
@@ -81,8 +83,6 @@ enter(State) ->
     case catch start_work(State1) of
         {ok, S} ->
             {ok, S#{status => running}};
-        {ok, S, T} ->
-            {ok, S#{status => running}, T};
         {stop, Reason, S} ->
             leave(S, Reason);
         {'EXIT', Error} ->
@@ -102,12 +102,21 @@ enter(State) ->
 %%                                   {noreply, State, Timeout} |
 %%                                   {stop, Reason, Reply, State} |
 %%                                   {stop, Reason, State}
+%%  react(Message, State) ->
+%%                          {ok, State} |
+%%                          {ok, Output, State} |
+%%                          {stop, Reason, Reply, State} |
+%%                          {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
 handle_call(Request, From, #{react := React} = State) ->
     case catch React({'$xl_command', From, Request}, State) of
         {'EXIT', Reason} ->
             {stop, Reason, {error, abort}, State#{status => exception}};
+        {ok, NewState} ->
+            {noreply, NewState};
+        {ok, Reply, NewState} ->
+            {reply, Reply, NewState};
         Result ->
             Result
     end;
@@ -130,6 +139,10 @@ handle_cast(Message, #{react := React} = State) ->
     case catch React({'$xl_notify', Message}, State) of
         {'EXIT', Reason} ->
             {stop, Reason, State#{status => exception}};
+        {ok, NewState} ->
+            {noreply, NewState};
+        {ok, _, NewState} ->
+            {noreply, NewState};
         Result ->
             Result
     end;
@@ -153,7 +166,7 @@ handle_info(Info, #{react := React} = State) ->
     case catch React(Info, State) of
         {'EXIT', Reason} ->
             {stop, Reason, State#{status => exception}};
-        {reply, Reply, S} ->
+        {ok, Reply, S} ->
             case Info of
                 {'$xl_command', From, _} ->
                     gen_server:reply(From, Reply),
@@ -161,14 +174,8 @@ handle_info(Info, #{react := React} = State) ->
                 _ ->
                     {noreply, S}
             end;
-        {reply, Reply, S, T} ->
-            case Info of
-                {'$xl_command', From, _} ->
-                    gen_server:reply(From, Reply),
-                    {noreply, S, T};
-                _ ->
-                    {noreply, S, T}
-            end;
+        {ok, S} ->
+            {noreply, S};
         Result ->
             Result
     end;
@@ -187,6 +194,7 @@ handle_info(_Info, State) ->
 %% with Reason. The return value is ignored.
 %%
 %% @spec terminate(Reason, State) -> void()
+%%  exit(State) -> {Sign, State}
 %% @end
 %%--------------------------------------------------------------------
 terminate(Reason, State) ->

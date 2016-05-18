@@ -70,34 +70,25 @@ process(Message, Fsm) ->
 relay(Message, #{state := State, status := running} = Fsm) ->
     relay(Message, State, Fsm);
 relay({'$xl_command', _, _}, Fsm) ->
-    {reply, not_ready, Fsm};
+    {ok, not_ready, Fsm};
 relay(_, Fsm) ->
-    {noreply, Fsm}.
+    {ok, Fsm}.
 
 
 relay(Message, #{react := React} = State, Fsm) ->
     case React(Message, State) of
-        {reply, R, S} ->
-            {reply, R, Fsm#{state := S}};
-        {reply, R, S, T} ->
-            {reply, R, Fsm#{state := S}, T};
-        {noreply, S} ->
-            {noreply, Fsm#{state := S}};
-        {noreply, S, T} ->
-            {noreply, Fsm#{state := S}, T};
+        {ok, R, S} ->
+            {ok, R, Fsm#{state := S}};
+        {ok, S} ->
+            {ok, Fsm#{state := S}};
         {stop, Reason, S} ->
             {Sign, S1} = xl_state:leave(S, Reason),
-            case transfer(Fsm#{state := S1}, Sign) of
-                {ok, NewFsm} ->
-                    {noreply, NewFsm};
-                Stop ->
-                    Stop
-            end;
+            transfer(Fsm#{state := S1}, Sign);
         {stop, Reason, Reply, S} ->
             {Sign, S1} = xl_state:leave(S, Reason),
             case transfer(Fsm#{state := S1}, Sign) of
                 {ok, NewFsm} ->
-                    {reply, Reply, NewFsm};
+                    {ok, Reply, NewFsm};
                 {stop, R, NewFsm} ->
                     {stop, R, Reply, NewFsm};
                 Stop ->
@@ -105,7 +96,7 @@ relay(Message, #{react := React} = State, Fsm) ->
             end
     end;
 relay(_, _, Fsm) ->
-    {noreply, Fsm}.
+    {ok, Fsm}.
 
 on_command({_, _, stop}, Fsm) ->
     {Reply, Fsm1} = stop_fsm(Fsm, command),
@@ -120,34 +111,29 @@ on_command({_, _, Command},
             } = Fsm) ->
     Timeout = maps:get(timeout, Fsm, infinity),
     Result = xl_state:invoke(Pid, Command, Timeout),
-    {reply, Result, Fsm};  % notice: timeout exception
+    {ok, Result, Fsm};  % notice: timeout exception
 on_command(Command, #{status := running} = Fsm) ->
     relay(Command, Fsm);
 on_command(_, Fsm) ->
-    {reply, unknown, Fsm}.
+    {ok, unknown, Fsm}.
 
 on_notify({_, Info}, #{state_mode := standalone, state_pid := Pid} = Fsm) ->
     ok = gen_server:cast(Pid, Info),
-    {noreply, Fsm};
+    {ok, Fsm};
 on_notify(Notification, #{status := running} = Fsm) ->
     relay(Notification, Fsm);
 on_notify(_, Fsm) ->
-    {noreply, Fsm}.
+    {ok, Fsm}.
 
 on_message({'EXIT', Pid, {D, S}}, #{state_pid := Pid} = Fsm) ->
-    case transfer(Fsm#{state := S}, D) of 
-        {ok, Fsm1} ->
-            {noreply, Fsm1};
-        Stop ->
-            Stop
-    end;
+    transfer(Fsm#{state := S}, D); 
 on_message(Message, #{state_mode := standalone, state_pid := Pid} = Fsm) ->
     Pid ! Message,
-    {noreply, Fsm};
+    {ok, Fsm};
 on_message(Message, #{status := running} = Fsm) ->
     relay(Message, Fsm);
 on_message(_, Fsm) ->
-    {noreply, Fsm}.
+    {ok, Fsm}.
 
 transfer(Fsm, Sign) ->
     Step = maps:get(step, Fsm, 0),
