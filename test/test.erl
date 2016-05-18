@@ -32,11 +32,11 @@ work_fast(_S) ->
 s_react(transfer, S) ->
     {stop, transfer, S};
 s_react({'$xl_command', _, {get, state}}, S) ->
-    {reply, maps:get(state_name, S), S};
+    {ok, maps:get(state_name, S), S};
 s_react({'$xl_notify', {transfer, Next}}, S) ->
     {stop, transfer, S#{sign => Next}};
 s_react(_, S) ->  % drop unknown message.
-    {noreply, S}.
+    {ok, S}.
 
 
 simple_state_test() ->
