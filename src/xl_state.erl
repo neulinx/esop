@@ -16,7 +16,7 @@
 
 %% API
 -export([start_link/1, start_link/2, start/1, start/2]).
-
+-export([create/2]).
 -export([invoke/2, invoke/3, notify/2]).
 -export([deactivate/1, deactivate/2, deactivate/3]).
 -export([enter/1, leave/1, leave/2]).
@@ -47,6 +47,14 @@ start(State) ->
 
 start(State, Options) ->
     gen_server:start(?MODULE, State, Options).
+
+create(Module, Data) when is_map(Data) ->
+    Data#{entry => fun Module:entry/1,
+          exit => fun Module:exit/1,
+          react => fun Module:react/2
+         };
+create(Module, Data) when is_list(Data) ->
+    create(Module, maps:from_list(Data)).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -316,3 +324,22 @@ try_exit(#{sign := Sign} = State) ->
     {Sign, State};
 try_exit(State) ->
     {stopped, State}.
+
+%%%===================================================================
+%%% Unit test
+%%%===================================================================
+-ifdef(TEST).
+
+s1_entry(S) ->
+    S1 = S#{output => "Hello world!", sign => s2},
+    {ok, S1}.
+state_test() ->
+    S = #{entry => fun s1_entry/1},
+    {ok, Pid} = start(S),
+    Res = gen_server:call(Pid, test),
+    ?assert(Res =:= unknown),
+    {'EXIT', {Sign, Final}} = (catch gen_server:stop(Pid)),
+    ?assertMatch(#{output := "Hello world!"}, Final),
+    ?assert(Sign =:= s2).
+
+-endif.
