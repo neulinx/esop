@@ -10,7 +10,6 @@
 
 -compile({no_auto_import,[exit/1]}).
 %% API
--export([create/1]).
 -export([entry/1, react/2, exit/1]).
 
 -ifdef(TEST).
@@ -20,14 +19,6 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
-create(Data) when is_map(Data) ->
-    Data#{entry => fun ?MODULE:entry/1,
-          exit => fun ?MODULE:exit/1,
-          react => fun ?MODULE:react/2
-         };
-create(Data) when is_list(Data) ->
-    create(maps:from_list(Data)).
-
 %%--------------------------------------------------------------------
 %% @doc
 %% @spec
@@ -104,6 +95,9 @@ on_command({_, _, stop}, Fsm) ->
 on_command({_, _, {stop, Reason}}, Fsm) ->
     {Reply, Fsm1} = stop_fsm(Fsm, Reason),
     {stop, Reason, Reply, Fsm1};
+%% First layer, FSM attribute. Atomic type is reserved for internal.
+on_command({_, _, Key}, Fsm) when is_atom(Key) ->
+    {ok, maps:get(Key, Fsm, undefined), Fsm};
 on_command({_, _, Command},
            #{state_mode := standalone,
              status := running,
@@ -233,3 +227,116 @@ archive(#{state := State} = Fsm)  ->
     end;
 archive(Fsm) ->
     Fsm.
+
+%%%===================================================================
+%%% Unit test
+%%%===================================================================
+-ifdef(TEST).
+
+s1_entry(S) ->
+    S1 = S#{output => "Hello world!", sign => s2},
+    {ok, S1}.
+s2_entry(S) ->
+    S1 = S#{output => "State 2", sign => s1},
+    {ok, S1}.
+    
+work_now(S) ->
+    {stop, done, S#{output => pi}}.
+    
+work_slowly(_S) ->
+    receive
+        {'$xl_notify', {stop, _Reason}} ->
+            exit(pi)
+    end.
+
+work_fast(_S) ->
+    exit(pi).
+
+s_react(transfer, S) ->
+    {stop, transfer, S};
+s_react({'$xl_command', _, {get, state}}, S) ->
+    {ok, maps:get(state_name, S), S};
+s_react({'$xl_notify', {transfer, Next}}, S) ->
+    {stop, transfer, S#{sign => Next}};
+s_react(_, S) ->  % drop unknown message.
+    {ok, S}.
+
+create_fsm() -> 
+    S1 = #{state_name => state1,
+           react => fun s_react/2,
+           entry => fun s1_entry/1},
+    S2 = #{state_name => state2,
+           react => fun s_react/2,
+           entry => fun s2_entry/1},
+    S3 = #{state_name => state3,
+           work_mode => block,
+           do => fun work_now/1,
+           react => fun s_react/2,
+           entry => fun s1_entry/1},
+    S4 = #{state_name => state4,
+           engine => reuse,
+           do => fun work_slowly/1,
+           react => fun s_react/2,
+           entry => fun s2_entry/1},
+    S5 = #{state_name => state5,
+           do => fun work_fast/1,
+           react => fun s_react/2,
+           entry => fun s2_entry/1},
+    States = #{{'$root', start} => S1,
+               {state1, s1} => S1,
+               {state1, s2} => S2,
+               {state1, s3} => S3,
+               {state2, s1} => S1,
+               {state2, s2} => S2,
+               {state2, s4} => S4,
+               {state3, s1} => S1,
+               {state3, s2} => S2,
+               {state3, s4} => S4,
+               {state4, s5} => S5,
+               {state4, s2} => S2,
+               {state4, s3} => S3,
+               {state5, s1} => S1,
+               {state5, s2} => S2,
+               {state5, s3} => S3},
+    xl_state:create(xl_fsm, [{states, States}]).
+    
+fsm_reuse_test() ->
+    Fsm = create_fsm(),
+    %% reuse fsm process, is default.
+    fsm_test_cases(Fsm).
+fsm_standalone_test() ->
+    Fsm = create_fsm(),
+    %% standalone process for each state.
+    Fsm1 = Fsm#{engine => standalone, max_trace => 3},
+    fsm_test_cases(Fsm1).
+
+fsm_test_cases(Fsm) ->
+    erlang:process_flag(trap_exit, true),
+    {ok, Pid} = xl_state:start_link(Fsm),
+    ?assert(state1 =:= xl_state:invoke(Pid, {get, state})),
+    ?assertMatch(#{state_name := state1}, gen_server:call(Pid, state)),
+    Pid ! transfer,
+    timer:sleep(10),
+    ?assert(state2 =:= gen_server:call(Pid, {get, state})),
+    ?assert(2 =:=  gen_server:call(Pid, step)),
+    gen_server:cast(Pid, {transfer, s4}),
+    timer:sleep(10),
+    ?assert(state4 =:= xl_state:invoke(Pid, {get, state})),
+    gen_server:cast(Pid, {transfer, s5}),
+    timer:sleep(10),
+    ?assert(state5 =:= xl_state:invoke(Pid, {get, state})),
+    ?assert(running =:= xl_state:invoke(Pid, status)),
+    gen_server:cast(Pid, {transfer, s3}),
+    timer:sleep(10),
+    ?assert(state2 =:= xl_state:invoke(Pid, {get, state})),
+    {s1, Final} = xl_state:deactivate(Pid),
+    ?assertMatch(#{step := 6, status := stopped}, Final),
+    #{trace := Trace, step := Step} = Final,
+    case maps:get(max_trace, Final, infinity) of
+        infinity ->
+            ?assert(Step - 1 =:= length(Trace));
+        MaxTrace ->
+            ?assert(MaxTrace =:= length(Trace))
+        end.
+
+-endif.
