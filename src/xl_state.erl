@@ -357,6 +357,6 @@ state_test_() ->
                    {s2, Final} = deactivate(Pid2),
                    ?assertMatch(#{output := "Hello world!"}, Final)
            end,
-    [GenStop, Stop].
+    [{"gen_server:stop", GenStop}, {"deactivate", Stop}].
 
 -endif.
