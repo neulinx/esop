@@ -1,10 +1,10 @@
 %%%-------------------------------------------------------------------
-%%% @author Guiqing Hai <gary@XL59.com>
-%%% @copyright (C) 2016, Guiqing Hai
+%%% @author Gary Hai <gary@XL59.com>
+%%% @copyright (C) 2016, Neulinx Collaborations Ltd.
 %%% @doc
-%%%
+%%%  Finite State Machine as a normal state object.
 %%% @end
-%%% Created : 30 Apr 2016 by Guiqing Hai <gary@XL59.com>
+%%% Created : 30 Apr 2016 by Gary Hai <gary@XL59.com>
 %%%-------------------------------------------------------------------
 -module(xl_fsm).
 
@@ -17,20 +17,35 @@
 -endif.
 
 %%%===================================================================
+%%% Common types
+%%%===================================================================
+-export_type([engine/0]).
+
+-type engine() :: 'reuse' | 'standalone'.
+-type fsm() :: xl_state:state().
+-type message() :: xl_state:message().
+-type entry_ret() :: xl_state:ok() | xl_state:stop() | xl_state:output().
+-type exit_ret() :: xl_state:output().
+-type react_ret() :: xl_state:ok() | xl_state:stop().
+
+%%%===================================================================
 %%% API
 %%%===================================================================
 %%--------------------------------------------------------------------
 %% @doc
-%% @spec
+%% Actions of state.
 %% @end
 %%--------------------------------------------------------------------
+-spec entry(fsm()) -> entry_ret().
 entry(Fsm) ->
     erlang:process_flag(trap_exit, true),
     transfer(Fsm, start).
 
+-spec react(message(), fsm()) -> react_ret().
 react(Message, Fsm) ->
     process(Message, Fsm).
 
+-spec exit(fsm()) -> exit_ret().
 exit(Fsm) ->
     Reason = maps:get(reason, Fsm, normal),
     stop_fsm(Fsm, Reason).
@@ -81,9 +96,7 @@ relay(Message, #{react := React} = State, Fsm) ->
                 {ok, NewFsm} ->
                     {ok, Reply, NewFsm};
                 {stop, R, NewFsm} ->
-                    {stop, R, Reply, NewFsm};
-                Stop ->
-                    Stop
+                    {stop, R, Reply, NewFsm}
             end
     end;
 relay(_, _, Fsm) ->
@@ -166,8 +179,6 @@ post_transfer({ok, NewState, Fsm}) ->
             case xl_state:enter(NewState) of
                 {ok, State} ->
                     {ok, F2#{state => State}};
-                {ok, State, T} ->
-                    {ok, F2#{state => State}, T};
                 {Sign, ErrState} ->
                     transfer(F2#{state => ErrState}, Sign)
             end
