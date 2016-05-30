@@ -24,9 +24,9 @@
 -type engine() :: 'reuse' | 'standalone'.
 -type fsm() :: xl_state:state().
 -type message() :: xl_state:message().
--type entry_ret() :: xl_state:ok() | xl_state:stop() | xl_state:output().
+-type entry_ret() :: xl_state:ok() | xl_state:fail().
 -type exit_ret() :: xl_state:output().
--type react_ret() :: xl_state:ok() | xl_state:stop().
+-type react_ret() :: xl_state:ok() | xl_state:fail().
 
 %%%===================================================================
 %%% API
@@ -59,23 +59,23 @@ next(#{state := State, states := States}, Sign) ->
     Name = maps:get(state_name, State),
     next(States, Name, Sign);
 next(#{states := States}, Sign) ->
-    next(States, '$root', Sign).
+    next(States, '_root', Sign).
 
 next(States, From, Sign) when is_function(States) ->
     States(From, Sign);
 next(States, From, Sign) ->
     maps:get({From, Sign}, States).
 
-process({'$xl_command', _, _} = Command, Fsm) ->
+process({xlx, _, _} = Command, Fsm) ->
     on_command(Command, Fsm);
-process({'$xl_notify', _} = Notification, Fsm) ->
+process({xlx, _} = Notification, Fsm) ->
     on_notify(Notification, Fsm);
 process(Message, Fsm) ->
     on_message(Message, Fsm).
 
 relay(Message, #{state := State, status := running} = Fsm) ->
     relay(Message, State, Fsm);
-relay({'$xl_command', _, _}, Fsm) ->
+relay({xlx, _, _}, Fsm) ->
     {ok, not_ready, Fsm};
 relay(_, Fsm) ->
     {ok, Fsm}.
@@ -117,7 +117,7 @@ on_command({_, _, Command},
              state_pid := Pid
             } = Fsm) ->
     Timeout = maps:get(timeout, Fsm, infinity),
-    Result = xl_state:invoke(Pid, Command, Timeout),
+    Result = xl_state:call(Pid, Command, Timeout),
     {ok, Result, Fsm};  % notice: timeout exception
 on_command(Command, #{status := running} = Fsm) ->
     relay(Command, Fsm);
@@ -209,7 +209,7 @@ stop_1(#{state_mode := standalone, state_pid := Pid} = Fsm, Reason) ->
     case is_process_alive(Pid) of
         true->
             Timeout = maps:get(timeout, Fsm, infinity),
-            case catch xl_state:deactivate(Pid, Reason, Timeout) of
+            case catch xl_state:stop(Pid, Reason, Timeout) of
                 {'EXIT', timeout} ->
                     {timeout, Fsm#{status := exception}};
                 {Sign, FinalState} ->
@@ -256,7 +256,7 @@ work_now(S) ->
     
 work_slowly(_S) ->
     receive
-        {'$xl_notify', {stop, _Reason}} ->
+        {xlx, {stop, _Reason}} ->
             exit(pi)
     end.
 
@@ -265,9 +265,9 @@ work_fast(_S) ->
 
 s_react(transfer, S) ->
     {stop, transfer, S};
-s_react({'$xl_command', _, {get, state}}, S) ->
+s_react({xlx, _, {get, state}}, S) ->
     {ok, maps:get(state_name, S), S};
-s_react({'$xl_notify', {transfer, Next}}, S) ->
+s_react({xlx, {transfer, Next}}, S) ->
     {stop, transfer, S#{sign => Next}};
 s_react(_, S) ->  % drop unknown message.
     {ok, S}.
@@ -293,7 +293,7 @@ create_fsm() ->
            do => fun work_fast/1,
            react => fun s_react/2,
            entry => fun s2_entry/1},
-    States = #{{'$root', start} => S1,
+    States = #{{'_root', start} => S1,
                {state1, s1} => S1,
                {state1, s2} => S2,
                {state1, s3} => S3,
@@ -324,7 +324,7 @@ fsm_standalone_test() ->
 fsm_test_cases(Fsm) ->
     erlang:process_flag(trap_exit, true),
     {ok, Pid} = xl_state:start_link(Fsm),
-    ?assert(state1 =:= xl_state:invoke(Pid, {get, state})),
+    ?assert(state1 =:= xl_state:call(Pid, {get, state})),
     ?assertMatch(#{state_name := state1}, gen_server:call(Pid, state)),
     Pid ! transfer,
     timer:sleep(10),
@@ -332,15 +332,15 @@ fsm_test_cases(Fsm) ->
     ?assert(2 =:=  gen_server:call(Pid, step)),
     gen_server:cast(Pid, {transfer, s4}),
     timer:sleep(10),
-    ?assert(state4 =:= xl_state:invoke(Pid, {get, state})),
+    ?assert(state4 =:= xl_state:call(Pid, {get, state})),
     gen_server:cast(Pid, {transfer, s5}),
     timer:sleep(10),
-    ?assert(state5 =:= xl_state:invoke(Pid, {get, state})),
-    ?assert(running =:= xl_state:invoke(Pid, status)),
+    ?assert(state5 =:= xl_state:call(Pid, {get, state})),
+    ?assert(running =:= xl_state:call(Pid, status)),
     gen_server:cast(Pid, {transfer, s3}),
     timer:sleep(10),
-    ?assert(state2 =:= xl_state:invoke(Pid, {get, state})),
-    {s1, Final} = xl_state:deactivate(Pid),
+    ?assert(state2 =:= xl_state:call(Pid, {get, state})),
+    {s1, Final} = xl_state:stop(Pid),
     ?assertMatch(#{step := 6, status := stopped}, Final),
     #{trace := Trace, step := Step} = Final,
     case maps:get(max_trace, Final, infinity) of
