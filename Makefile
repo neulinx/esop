@@ -1,14 +1,10 @@
-compile:
-	rebar3 compile
-all: compile test
-	rebar3 dialyzer
-clean:
-	rebar3 clean
-reset: clean
-	rebar3 unlock
+all: compile dialyzer
+compile dialyzer clean unlock:
+	rebar3 $@
+reset: clean unlock
 	rm -rf _build
 test:
 	rebar3 eunit --cover
 	rebar3 cover
 
-.PHONY: test
+.PHONY: all reset test compile dialyzer clean unlock 
