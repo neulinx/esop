@@ -18,7 +18,7 @@
 -export([start_link/1, start_link/2, start/1, start/2]).
 -export([stop/1, stop/2, stop/3]).
 -export([create/1, create/2]).
--export([call/2, call/3, cast/2]).
+-export([call/2, call/3, cast/2, reply/2]).
 -export([enter/1, leave/1, leave/2]).
 
 %% gen_server callbacks
@@ -215,7 +215,7 @@ handle_info(Info, #{react := React} = State) ->
         {ok, Reply, S} ->
             case Info of
                 {xlx, From, _} ->
-                    gen_server:reply(From, Reply),
+                    reply(From, Reply),
                     {noreply, S};
                 _ ->
                     {noreply, S}
@@ -275,6 +275,12 @@ leave(State, Reason) ->
 -spec code_change(OldVsn :: term(), state(), Extra :: term()) -> {'ok', state()}.
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+
+%% Same as gen_server:reply().
+-spec reply(from(), Reply :: term()) -> 'ok'.
+reply({To, Tag}, Reply) ->
+    catch To ! {Tag, Reply},
+    ok.
 
 %% Same as gen_server:call().
 -spec call(process(), request()) -> Reply :: term().
