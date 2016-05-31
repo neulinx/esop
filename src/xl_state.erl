@@ -29,27 +29,40 @@
 %%% Common types
 %%%===================================================================
 -export_type([from/0,
+              tag/0,
+              message/0,
               process/0,
               state/0,
-              request/0,
-              notification/0,
-              message/0,
               ok/0,
               fail/0,
-              output/0,
-              status/0,
-              work_mode/0]).
+              output/0]).
 
--type from() :: {To :: pid(), Tag :: term()}.
+-type from() :: {To :: pid(), Tag :: identifier()}.
 -type process() :: pid() | (LocalName :: atom()).
 -type start_ret() ::  {'ok', pid()} | 'ignore' | {'error', term()}.
 -type start_opt() ::
         {'timeout', Time :: timeout()} |
         {'spawn_opt', [proc_lib:spawn_option()]}.
--type state() :: #{}.
--type request() :: {'xlx', from(), Command :: term()}.
--type notification() :: {'xlx', Notification :: term()}.
--type message() :: request() | notification() | term().
+-type state() :: #{
+             'entry' => s_entry(),
+             'exit' => s_exit(),
+             'react' => s_react(),
+             'entry_time' => pos_integer(),
+             'exit_time' => pos_integer(),
+             'do' => s_worker() | module(),
+             'work_mode' => work_mode(),
+             'worker' => pid(),
+             'pid' => pid(),
+             'timeout' => timeout(),
+             'reason' => term(),
+             'sign' => term(),
+             'output' => term(),
+             'status' => status()
+            }.
+-type tag() :: 'xlx'.
+-type request() :: {tag(), from(), Command :: term()}.
+-type notification() :: {tag(), Notification :: term()}.
+-type message() :: request() | notification().
 -type ok() :: {'ok', state()} |
               {'ok', Result :: term(), state()}.
 -type output() :: {'stopped', state()} |
@@ -59,6 +72,11 @@
                 {'stop', Reason :: term(), state()}.
 -type status() :: 'running' | 'stopped' | 'exception' | 'undefined'.
 -type work_mode() :: 'standalone' | 'block' | 'takeover'.
+-type s_entry() :: fun((state()) -> ok() | fail()).
+-type s_exit() :: fun((state()) -> output()).
+-type s_react() :: fun((message() | term(), state()) -> output()).
+-type s_worker() :: fun((state()) -> no_return()).
+
 %%%===================================================================
 %%% API
 %%%===================================================================
