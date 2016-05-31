@@ -22,8 +22,25 @@
 -export_type([engine/0]).
 
 -type engine() :: 'reuse' | 'standalone'.
--type fsm() :: xl_state:state().
--type message() :: xl_state:message().
+-type name() :: term().
+-type sign() :: term().
+-type vector() :: {name(), sign()}.
+-type limit() :: pos_integer() | 'infinity'.
+-type state() :: #{'state_name' => term(),
+                   'engine' => engine()}
+               | xl_state:state().
+-type states() :: states_table() | states_fun().
+-type states_table() :: #{From :: vector() => To :: state()}.
+-type states_fun() :: fun((From :: name(), sign()) -> To :: state()).
+-type fsm() :: #{'state' => state(),
+                 'states' => states(),
+                 'state_mode' => engine(),
+                 'state_pid' => pid(),
+                 'step' => non_neg_integer(),
+                 'max_steps' => limit(),
+                 'max_traces' => limit(),
+                 'traces' => [state()] | fun((state()) -> any())
+                } | xl_state:state().
 -type entry_ret() :: xl_state:ok() | xl_state:fail().
 -type exit_ret() :: xl_state:output().
 -type react_ret() :: xl_state:ok() | xl_state:fail().
@@ -41,7 +58,7 @@ entry(Fsm) ->
     erlang:process_flag(trap_exit, true),
     transfer(Fsm, start).
 
--spec react(message(), fsm()) -> react_ret().
+-spec react(Message :: term(), fsm()) -> react_ret().
 react(Message, Fsm) ->
     process(Message, Fsm).
 
@@ -224,17 +241,17 @@ stop_1(#{state := State} = Fsm, Reason) ->
 stop_1(Fsm, _) ->
     {stopped, Fsm}.
 
-archive(#{trace := Trace} = Fsm) when is_function(Trace) ->
+archive(#{traces := Trace} = Fsm) when is_function(Trace) ->
     Trace(Fsm);
 archive(#{state := State} = Fsm)  ->
-    Trace = maps:get(trace, Fsm, []),
-    Limit = maps:get(max_trace, Fsm, infinity),
+    Trace = maps:get(traces, Fsm, []),
+    Limit = maps:get(max_traces, Fsm, infinity),
     NewTrace = [State | Trace],
     if
         length(NewTrace) > Limit ->
-            Fsm#{trace => lists:droplast(NewTrace)};
+            Fsm#{traces => lists:droplast(NewTrace)};
         true ->
-            Fsm#{trace => NewTrace}
+            Fsm#{traces => NewTrace}
     end;
 archive(Fsm) ->
     Fsm.
@@ -318,7 +335,7 @@ fsm_reuse_test() ->
 fsm_standalone_test() ->
     Fsm = create_fsm(),
     %% standalone process for each state.
-    Fsm1 = Fsm#{engine => standalone, max_trace => 3},
+    Fsm1 = Fsm#{engine => standalone, max_traces => 3},
     fsm_test_cases(Fsm1).
 
 fsm_test_cases(Fsm) ->
@@ -342,8 +359,8 @@ fsm_test_cases(Fsm) ->
     ?assert(state2 =:= xl_state:call(Pid, {get, state})),
     {s1, Final} = xl_state:stop(Pid),
     ?assertMatch(#{step := 6, status := stopped}, Final),
-    #{trace := Trace, step := Step} = Final,
-    case maps:get(max_trace, Final, infinity) of
+    #{traces := Trace, step := Step} = Final,
+    case maps:get(max_traces, Final, infinity) of
         infinity ->
             ?assert(Step - 1 =:= length(Trace));
         MaxTrace ->
