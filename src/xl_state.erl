@@ -15,7 +15,8 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/1, start_link/2, start/1, start/2]).
+-export([start_link/1, start_link/2, start_link/3]).
+-export([start/1, start/2, start/3]).
 -export([stop/1, stop/2, stop/3]).
 -export([create/1, create/2]).
 -export([call/2, call/3, cast/2, reply/2]).
@@ -37,6 +38,7 @@
               fail/0,
               output/0]).
 
+-type name() :: {local, atom()} | {global, atom()} | {via, atom(), term()}.
 -type from() :: {To :: pid(), Tag :: identifier()}.
 -type process() :: pid() | (LocalName :: atom()).
 -type start_ret() ::  {'ok', pid()} | 'ignore' | {'error', term()}.
@@ -95,6 +97,10 @@ start_link(State) ->
 start_link(State, Options) ->
     gen_server:start_link(?MODULE, State, Options).
 
+-spec start_link(name(), state(), [start_opt()]) -> start_ret().
+start_link(Name, State, Options) ->
+    gen_server:start_link(Name, ?MODULE, State, Options).
+
 -spec start(state()) -> start_ret().
 start(State) ->
     start(State, []).
@@ -102,6 +108,10 @@ start(State) ->
 -spec start(state(), [start_opt()]) -> start_ret().
 start(State, Options) ->
     gen_server:start(?MODULE, State, Options).
+
+-spec start(name(), state(), [start_opt()]) -> start_ret().
+start(Name, State, Options) ->
+    gen_server:start(Name, ?MODULE, State, Options).
 
 -spec create(module()) -> state().
 create(Module) ->
