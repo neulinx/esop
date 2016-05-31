@@ -422,4 +422,41 @@ state_test_() ->
            end,
     [{"gen_server:stop", GenStop}, {"stop", Stop}].
 
+%%----------------------------------------------------------------------
+%% Benchmark for message delivery and process exit throw.
+loop(_Pid, 0) ->
+    ok;
+loop(Pid, Count) ->
+    Pid ! {self(), test},
+    receive
+        got_it ->
+            NewPid = spawn(fun by_message/0);
+        {'EXIT', Pid, got_it} ->
+            NewPid = spawn_link(fun by_exit/0)
+    end,
+    loop(NewPid, Count - 1).
+
+
+by_message() ->
+    receive
+        {Pid, test} ->
+            Pid ! got_it
+    end.
+
+by_exit() ->
+    receive
+        {_, test} ->
+            erlang:exit(got_it)
+    end.
+
+benchmark(Count) ->
+    erlang:process_flag(trap_exit, true),
+    P1 = spawn(fun by_message/0),
+    P2 = spawn_link(fun by_exit/0),
+    ?debugTime("Messages delivery", loop(P1, Count)),
+    ?debugTime("Process throw", loop(P2, Count)).
+
+benchmark_test() ->
+    benchmark(100000).
+
 -endif.
