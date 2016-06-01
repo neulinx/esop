@@ -150,7 +150,9 @@ on_notify(_, Fsm) ->
     {ok, Fsm}.
 
 on_message({'EXIT', Pid, {D, S}}, #{state_pid := Pid} = Fsm) ->
-    transfer(Fsm#{state := S}, D); 
+    transfer(Fsm#{state := S}, D);
+on_message({'EXIT', Pid, Exception}, #{state_pid := Pid} = Fsm) ->
+    transfer(Fsm#{reason => Exception}, exception); 
 on_message(Message, #{state_mode := standalone, state_pid := Pid} = Fsm) ->
     Pid ! Message,
     {ok, Fsm};
