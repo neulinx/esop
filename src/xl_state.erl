@@ -72,7 +72,11 @@
                   {Sign :: term(), state()}.
 -type fail() :: {'stop', Reason :: term(), Result :: term(), state()} |
                 {'stop', Reason :: term(), state()}.
--type status() :: 'running' | 'stopped' | 'exception' | 'undefined'.
+-type status() :: 'running' |
+                  'stopped' |
+                  'exception' |
+                  'undefined' |
+                  'failover'.
 -type work_mode() :: 'standalone' | 'block' | 'takeover'.
 -type s_entry() :: fun((state()) -> ok() | fail()).
 -type s_exit() :: fun((state()) -> output()).
@@ -290,8 +294,13 @@ leave(State, Reason) ->
                  S1#{output => Workout}
          end,
     {Sign, S3} = try_exit(S2),
-    FinalState = S3#{exit_time => erlang:system_time(), status => stopped},
-    {Sign, FinalState}.
+    FinalState = S3#{exit_time => erlang:system_time()},
+    case maps:find(status, FinalState) of
+        {ok, running} ->
+            {Sign, FinalState#{status := stopped}};
+        _ ->
+            {Sign, FinalState}
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -300,7 +309,8 @@ leave(State, Reason) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec code_change(OldVsn :: term(), state(), Extra :: term()) -> {'ok', state()}.
+-spec code_change(OldVsn :: term(), state(), Extra :: term()) ->
+                         {'ok', state()}.
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
@@ -397,7 +407,7 @@ stop_work(_, _) ->
 try_exit(#{exit := Exit} = State) ->
     case catch Exit(State) of
         {'EXIT', _} ->
-            {exception, State};
+            {exception, State#{status := exception}};
         Result ->
             Result
     end;
