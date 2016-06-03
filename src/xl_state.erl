@@ -124,7 +124,7 @@ create(Module) ->
 %% Create state object from module and given parameters.
 %% If there is an exported function create/1 in the module, 
 %%  create new state object by it instead.
--spec create(module(), #{} | []) -> state().
+-spec create(module(), map() | list()) -> state().
 create(Module, Data) when is_map(Data) ->
     case erlang:function_exported(Module, create, 1) of
         true ->

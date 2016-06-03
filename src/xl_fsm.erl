@@ -16,7 +16,7 @@
     -include_lib("eunit/include/eunit.hrl").
 -endif.
 
--define(RETRY_INTERVAL, 0).
+-define(RETRY_INTERVAL, 1).
 %%%===================================================================
 %%% Common types
 %%%===================================================================
@@ -49,6 +49,8 @@
                  'max_retry' => limit(),
                  'retry_count' => non_neg_integer(),
                  'retry_interval' => non_neg_integer(),
+                 'max_pending_size' => limit(),
+                 'pending_queue' => list(),
                  'max_traces' => limit(),
                  'traces' => [state()] | fun((state()) -> any())
                 } | xl_state:state().
@@ -78,7 +80,8 @@ react(Message, Fsm) ->
             Output
     catch
         C: E ->
-            transfer(Fsm#{reason => {C, E}}, exception)
+            {ok, Fsm1} = pending(Message, Fsm),
+            transfer(Fsm1#{reason => {C, E}}, exception)
     end.
 
 -spec exit(fsm()) -> exit_ret().
@@ -139,12 +142,6 @@ relay(Message, #{react := React} = State, Fsm) ->
 relay(_, _, Fsm) ->
     {ok, Fsm}.
 
-on_command({_, _, stop}, Fsm) ->
-    {Reply, Fsm1} = stop_fsm(Fsm, command),
-    {stop, command, Reply, Fsm1};
-on_command({_, _, {stop, Reason}}, Fsm) ->
-    {Reply, Fsm1} = stop_fsm(Fsm, Reason),
-    {stop, Reason, Reply, Fsm1};
 %% First layer, FSM attribute. Atomic type is reserved for internal.
 on_command({_, _, Key}, Fsm) when is_atom(Key) ->
     {ok, maps:get(Key, Fsm, undefined), Fsm};
@@ -156,9 +153,13 @@ on_command(Command,
     {ok, Fsm};
 on_command(Command, #{status := running} = Fsm) ->
     relay(Command, Fsm);
+on_command(Command, #{status := failover} = Fsm) ->
+    pending(Command, Fsm);
 on_command(_, Fsm) ->
     {ok, unavailable, Fsm}.
 
+on_notify(Info, #{status := failover} = Fsm) ->
+    pending(Info, Fsm);
 on_notify(Info, #{state_mode := standalone,
                   state_pid := Pid,
                   status := running} = Fsm) ->
@@ -169,24 +170,23 @@ on_notify(Notification, #{status := running} = Fsm) ->
 on_notify(_, Fsm) ->
     {ok, Fsm}.
 
+on_message(xlx_retry, #{status := failover} = Fsm) ->
+    retry(Fsm); 
+on_message(Info, #{status := failover} = Fsm) ->
+    pending(Info, Fsm);
 on_message({'EXIT', Pid, {D, S}}, #{state_pid := Pid} = Fsm) ->
     transfer(Fsm#{state := S}, D);
 on_message({'EXIT', Pid, Exception}, #{state_pid := Pid} = Fsm) ->
     transfer(Fsm#{reason => Exception}, exception); 
-on_message(xlx_retry, #{status := failover} = Fsm) ->
-    retry(Fsm); 
-on_message(Message, #{state_mode := standalone, state_pid := Pid} = Fsm) ->
+on_message(Message, #{state_mode := standalone,
+                      status := running,
+                      state_pid := Pid} = Fsm) ->
     Pid ! Message,
     {ok, Fsm};
 on_message(Message, #{status := running} = Fsm) ->
     relay(Message, Fsm);
 on_message(_, Fsm) ->
     {ok, Fsm}.
-
-transfer(Fsm, Sign) ->
-    Step = maps:get(step, Fsm, 0),
-    F1 = Fsm#{step => Step + 1},
-    post_transfer(pre_transfer(F1, Sign)).
 
 pre_transfer(#{steps := Steps, max_steps := MaxSteps} = Fsm, _)
   when Steps >= MaxSteps ->
@@ -203,11 +203,24 @@ pre_transfer(Fsm, Sign) ->
             transfer(Fsm, exception)
     end.
 
-post_transfer({recover, Fsm}) ->
+post_transfer({ok, #{max_pending_size := Max, pending_queue := Gap} = Fsm})
+  when Max > 0 andalso length(Gap) > 0 ->
+    Self = self(),
+    [Self ! Message || Message <- Gap],  % Re-send.
+    {ok, Fsm#{pending_queue := []}};
+post_transfer(Result) ->
+    Result.
+
+transfer(Fsm, Sign) ->
+    Step = maps:get(step, Fsm, 0),
+    F1 = Fsm#{step => Step + 1},
+    post_transfer(transfer(pre_transfer(F1, Sign))).
+
+transfer({recover, Fsm}) ->
     recover(Fsm);
-post_transfer({stop, _, _} = Stop) ->
+transfer({stop, _, _} = Stop) ->
     Stop;
-post_transfer({ok, NewState, Fsm}) ->
+transfer({ok, NewState, Fsm}) ->
     F1 = archive(Fsm),  % archive successful states only.
     F2 = F1#{state => NewState, state_mode => reuse},
     case engine_mode(F2) of
@@ -339,15 +352,26 @@ archive(#{traces := Trace} = Fsm) when is_function(Trace) ->
 archive(#{state := State} = Fsm)  ->
     Trace = maps:get(traces, Fsm, []),
     Limit = maps:get(max_traces, Fsm, infinity),
-    NewTrace = [State | Trace],
-    if
-        length(NewTrace) > Limit ->
-            Fsm#{traces => lists:droplast(NewTrace)};
-        true ->
-            Fsm#{traces => NewTrace}
-    end;
+    Trace1 = enqueue(State, Trace, Limit),
+    Fsm#{traces => Trace1};
 archive(Fsm) ->
     Fsm.
+
+enqueue(_Item, _Queue, 0) ->
+    [];
+enqueue(Item, Queue, infinity) ->
+    [Item | Queue];
+enqueue(Item, Queue, Limit) ->
+    lists:sublist([Item | Queue], Limit).
+
+pending(_Request, #{max_pending_size := 0} = Fsm) ->
+    {ok, Fsm};
+pending(Request, #{max_pending_size := Max} = Fsm) ->
+    Q = maps:get(pending_queue, Fsm, []),
+    Q1 = enqueue(Request, Q, Max),
+    {ok, Fsm#{pending_queue => Q1}};
+pending(_Request, Fsm) ->
+    {ok, Fsm}.
 
 %%%===================================================================
 %%% Unit test
@@ -436,13 +460,13 @@ create_fsm() ->
     
 fsm_reuse_test() ->
     Fsm = create_fsm(),
-    Fsm1 = Fsm#{recovery => {0,
-                             #{counter => 0, recovery => restart}}},
+    Fsm1 = Fsm#{max_pending_size => 5,
+             recovery => {0, #{recovery => {reset, 0, #{}}}}},
     %% reuse fsm process, is default.
     fsm_test_cases(Fsm1).
 fsm_standalone_test() ->
     Fsm = create_fsm(),
-    Fsm1 = Fsm#{recovery => {reset, state2,
+    Fsm1 = Fsm#{recovery => {state2,
                 #{recovery => {reset, -1, #{new_data => 1}}}}},
     %% standalone process for each state.
     Fsm2 = Fsm1#{engine => standalone, max_traces => 4},
@@ -457,38 +481,45 @@ fsm_test_cases(Fsm) ->
     ?assert(state1 =:= xl_state:call(Pid, {get, state})),
     ?assertMatch(#{state_name := state1}, gen_server:call(Pid, state)),
     Pid ! transfer,
-    timer:sleep(1),
+    timer:sleep(4),
     ?assert(state2 =:= gen_server:call(Pid, {get, state})),
     ?assert(2 =:=  gen_server:call(Pid, step)),
     %% Failover test.
     ?assert(1 =:= xl_state:call(Pid, "error_test")),
     ?assert(2 =:= xl_state:call(Pid, "error_test")),
-    catch xl_state:call(Pid, "error_test", 1),
+    case xl_state:call(Pid, max_pending_size) of
+        5 ->
+            ?assertMatch(1, xl_state:call(Pid, "error_test"));
+        _ ->
+            catch xl_state:call(Pid, "error_test", 1)
+    end,
+    timer:sleep(4),
     %% Worker inside state test.
     gen_server:cast(Pid, {transfer, s4}),
-    timer:sleep(1),
+    timer:sleep(4),
     ?assertMatch(state4, xl_state:call(Pid, {get, state})),
     gen_server:cast(Pid, {transfer, s5}),
-    timer:sleep(1),
+    timer:sleep(4),
     ?assert(state5 =:= xl_state:call(Pid, {get, state})),
     ?assert(running =:= xl_state:call(Pid, status)),
     gen_server:cast(Pid, {transfer, s3}),
-    timer:sleep(1),
+    timer:sleep(4),
     ?assert(state2 =:= xl_state:call(Pid, {get, state})),
     %% Failover test again.
     ?assert(1 =:= xl_state:call(Pid, "error_test")),
     ?assert(2 =:= xl_state:call(Pid, "error_test")),
     catch xl_state:call(Pid, "error_test", 1),
     %% Stop. 
+    timer:sleep(4),
     {Sign, Final} = xl_state:stop(Pid),
     #{traces := Trace} = Final,
     case maps:get(max_traces, Final, infinity) of
-        infinity ->  % Trace_reuse: 1->*2->2->4->5->3->*1->1
-            ?assert(Sign =:= s2),
-            ?assertMatch(#{step := 10}, Final),
-            ?assertMatch(7, length(Trace));
+        infinity ->  % Trace_reuse: 1->*2->*2->2->4->5->3->*2=>2
+            ?assertMatch(s1, Sign),
+            ?assertMatch(#{step := 12}, Final),
+            ?assertMatch(8, length(Trace));
         MaxTrace ->  % Trace_standalone: 1->*2->2->4->5->3->*3->3->1
-            ?assert(Sign =:= s1),
+            ?assertMatch(s1, Sign),
             ?assertMatch(#{step := 11, new_data := 1}, Final),
             ?assertMatch(MaxTrace, length(Trace))
     end.
