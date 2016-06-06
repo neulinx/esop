@@ -20,12 +20,12 @@
 %%%===================================================================
 %%% Common types
 %%%===================================================================
--export_type([engine/0]).
+-export_type([engine/0, fsm/0]).
 
 -type engine() :: 'reuse' | 'standalone'.
 -type name() :: term().
--type sign() :: term().
--type vector() :: {name(), sign()}.
+-type sign() :: term().  % must not be tuple type.
+-type vector() :: {name(), sign()} | (FromRoot :: sign()).
 -type limit() :: pos_integer() | 'infinity'.
 -type state() :: #{'state_name' => term(),
                    'engine' => engine()}
@@ -43,6 +43,7 @@
                  'states' => states(),
                  'state_mode' => engine(),
                  'state_pid' => pid(),
+                 'engine' => engine(),
                  'step' => non_neg_integer(),
                  'max_steps' => limit(),
                  'recovery' => recovery(),
