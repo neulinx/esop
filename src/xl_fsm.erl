@@ -20,15 +20,14 @@
 %%%===================================================================
 %%% Common types
 %%%===================================================================
--export_type([engine/0, fsm/0]).
+-export_type([fsm/0]).
 
--type engine() :: 'reuse' | 'standalone'.
 -type name() :: term().
 -type sign() :: term().  % must not be tuple type.
 -type vector() :: {name(), sign()} | (FromRoot :: sign()).
 -type limit() :: pos_integer() | 'infinity'.
--type state() :: #{'state_name' => term(),
-                   'engine' => engine()}
+-type state() :: #{'state_name' => term(),  % mandatory
+                   'fsm' => pid()} % mandatory
                | xl_state:state().
 -type states() :: states_table() | states_fun().
 -type states_table() :: #{From :: vector() => To :: state()}.
@@ -41,9 +40,7 @@
                     {'reset', rollback(), Mend :: map()}.
 -type fsm() :: #{'state' => state(),
                  'states' => states(),
-                 'state_mode' => engine(),
                  'state_pid' => pid(),
-                 'engine' => engine(),
                  'step' => non_neg_integer(),
                  'max_steps' => limit(),
                  'recovery' => recovery(),
@@ -72,18 +69,9 @@ entry(Fsm) ->
     erlang:process_flag(trap_exit, true),
     transfer(Fsm, start).
 
-
 -spec react(Message :: term(), fsm()) -> react_ret().
-%% todo: Add requests to queue when status is failover.
 react(Message, Fsm) ->
-    try process(Message, Fsm) of
-        Output ->
-            Output
-    catch
-        C: E ->
-            {ok, Fsm1} = pending(Message, Fsm),
-            transfer(Fsm1#{reason => {C, E}}, exception)
-    end.
+    process(Message, Fsm).
 
 -spec exit(fsm()) -> exit_ret().
 exit(Fsm) ->
@@ -115,59 +103,23 @@ process({xlx, _} = Notification, Fsm) ->
 process(Message, Fsm) ->
     on_message(Message, Fsm).
 
-relay(Message, #{state := State, status := running} = Fsm) ->
-    relay(Message, State, Fsm);
-relay({xlx, _, _}, Fsm) ->
-    {ok, not_ready, Fsm};
-relay(_, Fsm) ->
-    {ok, Fsm}.
-
-relay(Message, #{react := React} = State, Fsm) ->
-    case React(Message, State) of
-        {ok, R, S} ->
-            {ok, R, Fsm#{state := S}};
-        {ok, S} ->
-            {ok, Fsm#{state := S}};
-        {stop, Reason, S} ->
-            {Sign, S1} = xl_state:leave(S, Reason),
-            transfer(Fsm#{state := S1}, Sign);
-        {stop, Reason, Reply, S} ->
-            {Sign, S1} = xl_state:leave(S, Reason),
-            case transfer(Fsm#{state := S1}, Sign) of
-                {ok, NewFsm} ->
-                    {ok, Reply, NewFsm};
-                {stop, R, NewFsm} ->
-                    {stop, R, Reply, NewFsm}
-            end
-    end;
-relay(_, _, Fsm) ->
-    {ok, Fsm}.
-
 %% First layer, FSM attribute. Atomic type is reserved for internal.
 on_command({_, _, Key}, Fsm) when is_atom(Key) ->
     {ok, maps:get(Key, Fsm, undefined), Fsm};
-on_command(Command,
-           #{state_mode := standalone,
-             status := running,
-             state_pid := Pid} = Fsm) ->
+on_command(Command, #{status := running, state_pid := Pid} = Fsm) ->
     Pid ! Command,  % relay message and noreplay for call.
     {ok, Fsm};
-on_command(Command, #{status := running} = Fsm) ->
-    relay(Command, Fsm);
 on_command(Command, #{status := failover} = Fsm) ->
     pending(Command, Fsm);
-on_command(_, Fsm) ->
+on_command(_Command, Fsm) ->
     {ok, unavailable, Fsm}.
 
 on_notify(Info, #{status := failover} = Fsm) ->
     pending(Info, Fsm);
-on_notify(Info, #{state_mode := standalone,
-                  state_pid := Pid,
+on_notify(Info, #{state_pid := Pid,
                   status := running} = Fsm) ->
     Pid ! Info,
     {ok, Fsm};
-on_notify(Notification, #{status := running} = Fsm) ->
-    relay(Notification, Fsm);
 on_notify(_, Fsm) ->
     {ok, Fsm}.
 
@@ -179,13 +131,10 @@ on_message({'EXIT', Pid, {D, S}}, #{state_pid := Pid} = Fsm) ->
     transfer(Fsm#{state := S}, D);
 on_message({'EXIT', Pid, Exception}, #{state_pid := Pid} = Fsm) ->
     transfer(Fsm#{reason => Exception}, exception); 
-on_message(Message, #{state_mode := standalone,
-                      status := running,
+on_message(Message, #{status := running,
                       state_pid := Pid} = Fsm) ->
     Pid ! Message,
     {ok, Fsm};
-on_message(Message, #{status := running} = Fsm) ->
-    relay(Message, Fsm);
 on_message(_, Fsm) ->
     {ok, Fsm}.
 
@@ -223,33 +172,16 @@ transfer({stop, _, _} = Stop) ->
     Stop;
 transfer({ok, NewState, Fsm}) ->
     F1 = archive(Fsm),  % archive successful states only.
-    F2 = F1#{state => NewState, state_mode => reuse},
-    case engine_mode(F2) of
-        standalone ->
-            case xl_state:start_link(NewState) of
-                {ok, Pid} ->
-                    {ok, F2#{state_pid => Pid, state_mode => standalone}};
-                {error, {Sign, State}} ->
-                    transfer(F2#{state => State}, Sign);
-                {error, Exception} ->
-                    transfer(F2#{reason => Exception}, exception)
-            end;
-        _Reuse ->
-            case xl_state:enter(NewState) of
-                {ok, State} ->
-                    {ok, F2#{state => State}};
-                {Sign, ErrState} ->
-                    transfer(F2#{state => ErrState}, Sign)
-            end
+    F2 = F1#{state => NewState},  % Keep the initial state in Fsm.
+    case xl_state:start_link(NewState#{fsm => self()}) of
+        {ok, Pid} ->
+            {ok, F2#{state_pid => Pid}};
+        {error, {Sign, State}} ->
+            transfer(F2#{state => State}, Sign);
+        {error, Exception} ->  % For unhandled exceptions.
+            transfer(F2#{reason => Exception}, exception)
     end.
     
-engine_mode(#{state := #{engine := Mode}}) ->
-    Mode;
-engine_mode(#{engine := Mode}) ->
-    Mode;
-engine_mode(_) ->
-    reuse.
-
 %% To slow down the failover progress, retry operation always
 %% triggered by message.
 recover(#{retry_count := Count, max_retry := Max} = Fsm) when Count >= Max ->
@@ -329,12 +261,13 @@ stop_fsm(#{sign := Sign} = Fsm, _) ->
 stop_fsm(Fsm, _) ->
     {stopped, Fsm}.
 
-stop_1(#{state_mode := standalone, state_pid := Pid} = Fsm, Reason) ->
+stop_1(#{state_pid := Pid} = Fsm, Reason) ->
     case is_process_alive(Pid) of
         true->
             Timeout = maps:get(timeout, Fsm, infinity),
             case catch xl_state:stop(Pid, Reason, Timeout) of
                 {'EXIT', timeout} ->
+                    erlang:exit(Pid, kill),  % Mention case of trap exit.
                     {timeout, Fsm#{status := exception}};
                 {Sign, FinalState} ->
                     {Sign, Fsm#{state => FinalState, sign => Sign}}
@@ -342,9 +275,6 @@ stop_1(#{state_mode := standalone, state_pid := Pid} = Fsm, Reason) ->
         false ->
             {stopped, Fsm}
     end;
-stop_1(#{state := State} = Fsm, Reason) ->
-    {Sign, FinalState} = xl_state:leave(State, Reason),
-    {Sign, Fsm#{state => FinalState, sign => Sign}};
 stop_1(Fsm, _) ->
     {stopped, Fsm}.
 
@@ -365,6 +295,7 @@ enqueue(Item, Queue, infinity) ->
 enqueue(Item, Queue, Limit) ->
     lists:sublist([Item | Queue], Limit).
 
+%% Do not enqueue the message which crashed the state process.
 pending(_Request, #{max_pending_size := 0} = Fsm) ->
     {ok, Fsm};
 pending(Request, #{max_pending_size := Max} = Fsm) ->
@@ -396,7 +327,9 @@ work_slowly(_S) ->
             erlang:exit(pi)
     end.
 
-work_fast(_S) ->
+work_fast(#{fsm := Fsm, state_name := Name}) ->
+    S0 = xl_state:call(Fsm, state),
+    ?assertMatch(#{state_name := Name}, S0),
     erlang:exit(pi).
 
 %% Set counter 2 as pitfall.
@@ -428,7 +361,6 @@ create_fsm() ->
            react => fun s_react/2,
            entry => fun s1_entry/1},
     S4 = #{state_name => state4,
-           engine => reuse,
            do => fun work_slowly/1,
            react => fun s_react/2,
            entry => fun s2_entry/1},
@@ -459,19 +391,19 @@ create_fsm() ->
                {state5, s3} => S3},
     xl_state:create(xl_fsm, [{states, States}]).
     
-fsm_reuse_test() ->
+fsm_test() ->
+    Fsm = create_fsm(),
+    %% standalone process for each state.
+    Fsm1 = Fsm#{max_traces => 4,
+                recovery =>
+                    {state2, #{recovery => {reset, -1, #{new_data => 1}}}}},
+    fsm_test_cases(Fsm1).
+
+fsm_recovery_test() ->
     Fsm = create_fsm(),
     Fsm1 = Fsm#{max_pending_size => 5,
-             recovery => {0, #{recovery => {reset, 0, #{}}}}},
-    %% reuse fsm process, is default.
+                recovery => {0, #{recovery => {reset, 0, #{}}}}},
     fsm_test_cases(Fsm1).
-fsm_standalone_test() ->
-    Fsm = create_fsm(),
-    Fsm1 = Fsm#{recovery => {state2,
-                #{recovery => {reset, -1, #{new_data => 1}}}}},
-    %% standalone process for each state.
-    Fsm2 = Fsm1#{engine => standalone, max_traces => 4},
-    fsm_test_cases(Fsm2).
 
 fsm_test_cases(Fsm) ->
     %% Prepare.
@@ -479,47 +411,50 @@ fsm_test_cases(Fsm) ->
     error_logger:tty(false),
     {ok, Pid} = xl_state:start_link(Fsm),
     %% Basic actions.
-    ?assert(state1 =:= xl_state:call(Pid, {get, state})),
+    ?assertMatch(state1, xl_state:call(Pid, {get, state})),
     ?assertMatch(#{state_name := state1}, gen_server:call(Pid, state)),
     Pid ! transfer,
-    timer:sleep(4),
+    timer:sleep(10),
     ?assert(state2 =:= gen_server:call(Pid, {get, state})),
     ?assert(2 =:=  gen_server:call(Pid, step)),
     %% Failover test.
     ?assert(1 =:= xl_state:call(Pid, "error_test")),
     ?assert(2 =:= xl_state:call(Pid, "error_test")),
-    case xl_state:call(Pid, max_pending_size) of
-        5 ->
-            ?assertMatch(1, xl_state:call(Pid, "error_test"));
-        _ ->
-            catch xl_state:call(Pid, "error_test", 1)
+    catch xl_state:call(Pid, "error_test", 0),
+    SelfHeal = xl_state:call(Pid, max_pending_size),
+    try xl_state:call(Pid, {get, state}, 5) of
+        state2 ->
+            ?assert(SelfHeal =:= 5)
+    catch
+        exit: timeout ->
+            ?assert(SelfHeal =:= undefined)
     end,
-    timer:sleep(4),
+    timer:sleep(10),
     %% Worker inside state test.
     gen_server:cast(Pid, {transfer, s4}),
-    timer:sleep(4),
+    timer:sleep(10),
     ?assertMatch(state4, xl_state:call(Pid, {get, state})),
     gen_server:cast(Pid, {transfer, s5}),
-    timer:sleep(4),
+    timer:sleep(10),
     ?assert(state5 =:= xl_state:call(Pid, {get, state})),
     ?assert(running =:= xl_state:call(Pid, status)),
     gen_server:cast(Pid, {transfer, s3}),
-    timer:sleep(4),
+    timer:sleep(10),
     ?assert(state2 =:= xl_state:call(Pid, {get, state})),
     %% Failover test again.
     ?assert(1 =:= xl_state:call(Pid, "error_test")),
     ?assert(2 =:= xl_state:call(Pid, "error_test")),
     catch xl_state:call(Pid, "error_test", 1),
     %% Stop. 
-    timer:sleep(4),
+    timer:sleep(10),
     {Sign, Final} = xl_state:stop(Pid),
     #{traces := Trace} = Final,
     case maps:get(max_traces, Final, infinity) of
-        infinity ->  % Trace_reuse: 1->*2->*2->2->4->5->3->*2=>2
+        infinity ->  % recovery_test: 1->*2->2->2->4->5->3->*2->2 =>2
             ?assertMatch(s1, Sign),
-            ?assertMatch(#{step := 12}, Final),
-            ?assertMatch(8, length(Trace));
-        MaxTrace ->  % Trace_standalone: 1->*2->2->4->5->3->*3->3->1
+            ?assertMatch(#{step := 10}, Final),
+            ?assertMatch(7, length(Trace));
+        MaxTrace ->  % fsm_test: 1->*2->2->2->4->5->3->*2->3->3 =>2
             ?assertMatch(s1, Sign),
             ?assertMatch(#{step := 11, new_data := 1}, Final),
             ?assertMatch(MaxTrace, length(Trace))
