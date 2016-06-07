@@ -20,7 +20,6 @@
 -export([stop/1, stop/2, stop/3]).
 -export([create/1, create/2]).
 -export([call/2, call/3, cast/2, reply/2]).
--export([enter/1, leave/1, leave/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -46,12 +45,12 @@
         {'timeout', Time :: timeout()} |
         {'spawn_opt', [proc_lib:spawn_option()]}.
 -type state() :: #{
-             'entry' => s_entry(),
-             'exit' => s_exit(),
-             'react' => s_react(),
+             'entry' => entry(),
+             'do' => do(),
+             'react' => react(),
+             'exit' => exit(),
              'entry_time' => pos_integer(),
              'exit_time' => pos_integer(),
-             'do' => s_worker() | module(),
              'work_mode' => work_mode(),
              'worker' => pid(),
              'pid' => pid(),
@@ -77,11 +76,13 @@
                   'exception' |
                   'undefined' |
                   'failover'.
--type work_mode() :: 'standalone' | 'block' | 'takeover'.
--type s_entry() :: fun((state()) -> ok() | fail()).
--type s_exit() :: fun((state()) -> output()).
--type s_react() :: fun((message() | term(), state()) -> output()).
--type s_worker() :: fun((state()) -> no_return()).
+-type work_mode() :: 'async' | 'sync'.
+-type entry() :: fun((state()) -> ok() | fail()).
+-type exit() :: fun((state()) -> output()).
+-type react() :: fun((message() | term(), state()) -> output()).
+-type do() :: fun((state()) -> ok() | fail() | no_return()).
+%% work done output on async mode:
+%% {ok, map()} | {ok, Result::term()} | {stop, Reason :: term()}
 
 %%%===================================================================
 %%% API
@@ -130,9 +131,17 @@ create(Module, Data) when is_map(Data) ->
         true ->
             Module:create(Data);
         _ ->
-            Data#{entry => fun Module:entry/1,
-                  exit => fun Module:exit/1,
-                  react => fun Module:react/2}
+            Actions0 = [{entry, 1}, {do, 1}, {react, 2}, {exit, 1}],
+            Filter = fun({F, A}, Acts) ->
+                         case erlang:function_exported(Module, F, A) of
+                             true ->
+                                 Acts#{F => fun Module:F/A};
+                             false ->
+                                 Acts
+                         end
+                     end,
+            Actions = lists:foldl(Filter, #{}, Actions0),
+            maps:merge(Data, Actions)
     end;
 %% Convert data type from proplists to maps as type state().
 create(Module, Data) when is_list(Data) ->
@@ -151,28 +160,16 @@ create(Module, Data) when is_list(Data) ->
 %%--------------------------------------------------------------------
 -spec init(state()) -> {'ok', state()} | {'stop', output()}.
 init(State) ->
-    case catch enter(State) of
-        {'EXIT', Error} ->
-            exit({exception, State#{reason := Error}});
-        {ok, _} = Ok ->
-            Ok;
-        Result ->
-            {stop, Result}
-    end.
-
-%% fun exit/1 as a destructor must be called.
--spec enter(state()) -> ok() | output().
-enter(State) ->
     EntryTime = erlang:system_time(),
     State1 = State#{entry_time => EntryTime, pid =>self()},
-    case catch start_work(State1) of
+    case enter(State1) of
         {ok, S} ->
+            self() ! '_xlx_do_activity',  % Trigger off activity.
             {ok, S#{status => running}};
         {stop, Reason, S} ->
-            leave(S, Reason);
-        {'EXIT', Error} ->
-            ErrState = State1#{status => exception},
-            leave(ErrState, Error)
+            %% fun exit/1 must be called even initialization not successful.
+            self() ! {xlx, {stop, Reason}},  % Trigger off destruction.
+            {ok, S}
     end.
 
 %%--------------------------------------------------------------------
@@ -238,12 +235,24 @@ handle_cast(_Msg, State) ->
 -spec handle_info(Info :: term(), state()) ->
                          {'noreply', state()} |
                          {'stop', Reason :: term(), state()}.
+%% do activity can be asyn version of entry to initialize the state.
+%% If there is no do activity, actions in react can be dynamic version of do.
+handle_info('_xlx_do_activity', #{do := _} = State) ->
+    try do_activity(State) of
+        {ok, S} ->
+            {noreply, S};
+        {ok, Result, S} ->
+            {noreply, S#{output => Result}};
+        Stop ->
+            Stop
+    catch
+        _Error: Reason ->
+            {stop, Reason, State#{status => exception}}
+    end;
 handle_info({xlx, {stop, Reason}}, State) ->
     {stop, Reason, State};
 handle_info(Info, #{react := React} = State) ->
-    case catch React(Info, State) of
-        {'EXIT', Reason} ->
-            {stop, Reason, State#{status => exception}};
+    try React(Info, State) of
         {ok, Reply, S} ->
             case Info of
                 {xlx, From, _} ->
@@ -254,12 +263,15 @@ handle_info(Info, #{react := React} = State) ->
             end;
         {ok, S} ->
             {noreply, S};
-        Result ->
-            Result
+        Stop ->
+            Stop
+    catch
+        _Error: Reason ->
+            {stop, Reason, State#{status => exception}}
     end;
 %% worker is existed
-handle_info({'EXIT', From, Reason}, #{worker := From} = State) ->
-    {stop, Reason, State#{output => Reason}};
+handle_info({'EXIT', From, Output}, #{worker := From} = State) ->
+    done(Output, State);
 handle_info(_Info, State) ->
     {noreply, State}.  % todo: add hibernate parameter for state without handle.
 
@@ -277,30 +289,6 @@ handle_info(_Info, State) ->
 -spec terminate(Reason :: term(), state()) -> no_return().
 terminate(Reason, State) ->
     exit(leave(State, Reason)).
-
--spec leave(state()) -> output().
-leave(#{reason := Reason} = State) ->
-    leave(State, Reason);
-leave(State) ->
-    leave(State, normal).
-
--spec leave(state(), Reason :: term()) -> output().
-leave(State, Reason) ->
-    S1 = State#{reason => Reason},
-    S2 = case catch stop_work(S1, Reason) of
-             stopped ->
-                 S1;
-             Workout ->
-                 S1#{output => Workout}
-         end,
-    {Sign, S3} = try_exit(S2),
-    FinalState = S3#{exit_time => erlang:system_time()},
-    case maps:find(status, FinalState) of
-        {ok, running} ->
-            {Sign, FinalState#{status := stopped}};
-        _ ->
-            {Sign, FinalState}
-    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -368,36 +356,79 @@ stop(Process, Reason, Timeout) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-start_work(#{entry := Entry} = State) ->
-    case Entry(State) of
-        {ok, NewState} ->
-            do_activity(NewState);
-        Error ->
-            Error
+enter(#{entry := Entry} = State) ->
+    case catch Entry(State) of
+        {ok, S} ->
+            {ok, S};
+        {stop, Reason, S} ->
+            {stop, Reason, S};
+        {'EXIT', Error} ->
+            ErrState = State#{status => exception},
+            {stop, Error, ErrState}
     end;
-start_work(State) ->
-    do_activity(State).
+enter(State) ->
+    {ok, State}.
+
+leave(State, Reason) ->
+    S1 = State#{reason => Reason},
+    S2 = case stop_work(S1, Reason) of
+             stopped ->
+                 S1;
+             killed ->
+                 S1#{output => abort};
+             {noreply, S0} ->
+                 S0;
+             {stop, _, S0} ->
+                 S0
+         end,
+    {Sign, S3} = try_exit(S2),
+    FinalState = S3#{exit_time => erlang:system_time()},
+    case maps:find(status, FinalState) of
+        {ok, Status} when Status =/= running ->
+            {Sign, FinalState};
+        _ ->  % running or undefined
+            {Sign, FinalState#{status := stopped}}
+    end.
 
 do_activity(#{do := Do} = State) ->
-    case maps:get(work_mode, State, standalone) of
-        takeover ->  % redefine xl_state behaviors.
-            gen_server:enter_loop(Do, [], State);
-        block ->  % mention the timeout of gen_server response.
-            Do(State);
-        _standalone ->
-            erlang:process_flag(trap_exit, true),
+    case maps:get(work_mode, State, sync) of
+        async ->
+            erlang:process_flag(trap_exit, true),  % Potentially block exit.
             %% worker can not alert state directly.
             Worker = spawn_link(fun() -> Do(State) end),
-            {ok, State#{worker => Worker}}
+            {ok, State#{worker => Worker}};
+        _sync ->
+            %% Block gen_server work loop, 
+            %% mention the timeout of gen_server response.
+            Do(State)
     end;
 do_activity(State) ->
     {ok, State}.
+
+done({ok, #{} = Supplement}, State) ->
+    {noreply, maps:merge(State, Supplement)};
+done({ok, Result}, State) ->
+    {noreply, State#{output => Result}};
+done({stop, #{} = Supplement}, State) ->
+    Reason = maps:get(reason, Supplement, done),
+    {stop, Reason, maps:merge(State, Supplement)};
+done({stop, Reason}, State) ->
+    {stop, Reason, State};
+done(Exception, State) ->
+    {stop, Exception, State#{status := exception}}.
+
 
 stop_work(#{worker := Worker} = State, Reason) ->
     case is_process_alive(Worker) of
         true->
             Timeout = maps:get(timeout, State, infinity),
-            stop(Worker, Reason, Timeout);
+            try
+                done(stop(Worker, Reason, Timeout), State)
+            catch
+                {exit, timeout} ->
+                    erlang:exit(Worker, kill),
+                    killed
+            end;
         false ->
             stopped
     end;
@@ -422,61 +453,5 @@ try_exit(State) ->
 %%% Unit test
 %%%===================================================================
 -ifdef(TEST).
-
-s1_entry(S) ->
-    S1 = S#{output => "Hello world!", sign => s2},
-    {ok, S1}.
-state_test_() ->
-    S = #{entry => fun s1_entry/1},
-    {ok, Pid} = start(S),
-    Res = gen_server:call(Pid, test),
-    ?assert(Res =:= unknown),
-    GenStop = fun() ->
-                      {'EXIT', {s2, Final}} = (catch gen_server:stop(Pid)),
-                      ?assertMatch(#{output := "Hello world!"}, Final)
-              end,
-    Stop = fun() ->
-                   {ok, Pid2} = start(S),
-                   {s2, Final} = stop(Pid2),
-                   ?assertMatch(#{output := "Hello world!"}, Final)
-           end,
-    [{"gen_server:stop", GenStop}, {"stop", Stop}].
-
-%%----------------------------------------------------------------------
-%% Benchmark for message delivery and process exit throw.
-loop(_Pid, 0) ->
-    ok;
-loop(Pid, Count) ->
-    Pid ! {self(), test},
-    receive
-        got_it ->
-            NewPid = spawn(fun by_message/0);
-        {'EXIT', Pid, got_it} ->
-            NewPid = spawn_link(fun by_exit/0)
-    end,
-    loop(NewPid, Count - 1).
-
-
-by_message() ->
-    receive
-        {Pid, test} ->
-            Pid ! got_it
-    end.
-
-by_exit() ->
-    receive
-        {_, test} ->
-            erlang:exit(got_it)
-    end.
-
-benchmark(Count) ->
-    erlang:process_flag(trap_exit, true),
-    P1 = spawn(fun by_message/0),
-    P2 = spawn_link(fun by_exit/0),
-    ?debugTime("Messages delivery", loop(P1, Count)),
-    ?debugTime("Process throw", loop(P2, Count)).
-
-benchmark_test() ->
-    benchmark(100000).
 
 -endif.

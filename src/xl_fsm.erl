@@ -10,13 +10,13 @@
 
 -compile({no_auto_import,[exit/1]}).
 %% API
--export([entry/1, react/2, exit/1]).
+-export([do/1, react/2, exit/1]).
 
 -ifdef(TEST).
     -include_lib("eunit/include/eunit.hrl").
 -endif.
 
--define(RETRY_INTERVAL, 1).
+-define(RETRY_INTERVAL, 5).
 %%%===================================================================
 %%% Common types
 %%%===================================================================
@@ -52,7 +52,7 @@
                  'max_traces' => limit(),
                  'traces' => [state()] | fun((state()) -> any())
                 } | xl_state:state().
--type entry_ret() :: xl_state:ok() | xl_state:fail().
+-type do_ret() :: xl_state:ok() | xl_state:fail().
 -type exit_ret() :: xl_state:output().
 -type react_ret() :: xl_state:ok() | xl_state:fail().
 
@@ -64,8 +64,8 @@
 %% Actions of state.
 %% @end
 %%--------------------------------------------------------------------
--spec entry(fsm()) -> entry_ret().
-entry(Fsm) ->
+-spec do(fsm()) -> do_ret().
+do(Fsm) ->
     erlang:process_flag(trap_exit, true),
     transfer(Fsm, start).
 

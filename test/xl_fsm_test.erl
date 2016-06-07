@@ -17,19 +17,19 @@ s2_entry(S) ->
     S1 = S#{output => "State 2", sign => s1},
     {ok, S1}.
 
-work_now(S) ->
+work_instantly(S) ->
     {stop, done, S#{output => pi}}.
     
-work_slowly(_S) ->
+work_async(_S) ->
     receive
         {xlx, {stop, _Reason}} ->
-            erlang:exit(pi)
+            erlang:exit({stop, #{reason => finished, done => pi}})
     end.
 
-work_fast(#{fsm := Fsm, state_name := Name}) ->
+work_sync(#{fsm := Fsm, state_name := Name} = S) ->
     S0 = xl_state:call(Fsm, state),
     ?assertMatch(#{state_name := Name}, S0),
-    erlang:exit(pi).
+    {ok, pi, S}.
 
 %% Set counter 2 as pitfall.
 s_react({xlx, _, "error_test"}, #{counter := Count}) when Count =:= 2 ->
@@ -54,16 +54,16 @@ create_fsm() ->
            react => fun s_react/2,
            entry => fun s2_entry/1},
     S3 = #{state_name => state3,
-           work_mode => block,
-           do => fun work_now/1,
+           do => fun work_instantly/1,
            react => fun s_react/2,
            entry => fun s1_entry/1},
     S4 = #{state_name => state4,
-           do => fun work_slowly/1,
+           work_mode => async,
+           do => fun work_async/1,
            react => fun s_react/2,
            entry => fun s2_entry/1},
     S5 = #{state_name => state5,
-           do => fun work_fast/1,
+           do => fun work_sync/1,
            react => fun s_react/2,
            entry => fun s2_entry/1},
     States = #{start => S1,
@@ -120,7 +120,7 @@ fsm_test_cases(Fsm) ->
     ?assert(2 =:= xl_state:call(Pid, "error_test")),
     catch xl_state:call(Pid, "error_test", 0),
     SelfHeal = xl_state:call(Pid, max_pending_size),
-    try xl_state:call(Pid, {get, state}, 5) of
+    try xl_state:call(Pid, {get, state}, 20) of
         state2 ->
             ?assert(SelfHeal =:= 5)
     catch
@@ -134,11 +134,11 @@ fsm_test_cases(Fsm) ->
     ?assertMatch(state4, xl_state:call(Pid, {get, state})),
     gen_server:cast(Pid, {transfer, s5}),
     timer:sleep(10),
-    ?assert(state5 =:= xl_state:call(Pid, {get, state})),
+    ?assertMatch(state5, xl_state:call(Pid, {get, state})),
     ?assert(running =:= xl_state:call(Pid, status)),
     gen_server:cast(Pid, {transfer, s3}),
     timer:sleep(10),
-    ?assert(state2 =:= xl_state:call(Pid, {get, state})),
+    ?assertMatch(state2, xl_state:call(Pid, {get, state})),
     %% Failover test again.
     ?assert(1 =:= xl_state:call(Pid, "error_test")),
     ?assert(2 =:= xl_state:call(Pid, "error_test")),
@@ -157,3 +157,40 @@ fsm_test_cases(Fsm) ->
             ?assertMatch(#{step := 11, new_data := 1}, Final),
             ?assertMatch(MaxTrace, length(Trace))
     end.
+
+%%----------------------------------------------------------------------
+%% Benchmark for message delivery and process exit throw.
+loop(_Pid, 0) ->
+    ok;
+loop(Pid, Count) ->
+    Pid ! {self(), test},
+    receive
+        got_it ->
+            NewPid = spawn(fun by_message/0);
+        {'EXIT', Pid, got_it} ->
+            NewPid = spawn_link(fun by_exit/0)
+    end,
+    loop(NewPid, Count - 1).
+
+
+by_message() ->
+    receive
+        {Pid, test} ->
+            Pid ! got_it
+    end.
+
+by_exit() ->
+    receive
+        {_, test} ->
+            erlang:exit(got_it)
+    end.
+
+benchmark(Count) ->
+    erlang:process_flag(trap_exit, true),
+    P1 = spawn(fun by_message/0),
+    P2 = spawn_link(fun by_exit/0),
+    ?debugTime("Messages delivery", loop(P1, Count)),
+    ?debugTime("Process throw", loop(P2, Count)).
+
+benchmark_test() ->
+    benchmark(100000).
