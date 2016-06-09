@@ -51,10 +51,11 @@
              'exit' => exit(),
              'entry_time' => pos_integer(),
              'exit_time' => pos_integer(),
-             'work_mode' => work_mode(),
+             'work_mode' => work_mode(),  % default: sync
              'worker' => pid(),
-             'pid' => pid(),
-             'timeout' => timeout(),
+             'pid' => pid(),  % mandatory
+             'timeout' => timeout(),  % default: infinity
+             'hibernate' => timeout(),  % mandatory, default: infinity
              'reason' => term(),
              'sign' => term(),
              'output' => term(),
@@ -79,7 +80,7 @@
 -type work_mode() :: 'async' | 'sync'.
 -type entry() :: fun((state()) -> ok() | fail()).
 -type exit() :: fun((state()) -> output()).
--type react() :: fun((message() | term(), state()) -> output()).
+-type react() :: fun((message() | term(), state()) -> ok() | fail()).
 -type do() :: fun((state()) -> ok() | fail() | no_return()).
 %% work done output on async mode:
 %% {ok, map()} | {ok, Result::term()} | {stop, Reason :: term()}
@@ -161,7 +162,8 @@ create(Module, Data) when is_list(Data) ->
 -spec init(state()) -> {'ok', state()} | {'stop', output()}.
 init(State) ->
     EntryTime = erlang:system_time(),
-    State1 = State#{entry_time => EntryTime, pid =>self()},
+    Hib = maps:get(hibernate, State, infinity),
+    State1 = State#{entry_time => EntryTime, pid =>self(), hibernate => Hib},
     case enter(State1) of
         {ok, S} ->
             self() ! '_xlx_do_activity',  % Trigger off activity.
@@ -184,19 +186,8 @@ init(State) ->
                          {'noreply', state()} |
                          {stop, Reason :: term(), Reply :: term(), state()} |
                          {stop, Reason :: term(), state()}.
-handle_call(Request, From, #{react := React} = State) ->
-    case catch React({xlx, From, Request}, State) of
-        {'EXIT', Reason} ->
-            {stop, Reason, {error, abort}, State#{status => exception}};
-        {ok, NewState} ->
-            {noreply, NewState};
-        {ok, Reply, NewState} ->
-            {reply, Reply, NewState};
-        Result ->
-            Result
-    end;
-handle_call(_Request, _From, State) ->
-    {reply, unknown, State}.
+handle_call(Request, From, State) ->
+    handle_info({xlx, From, Request}, State).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -209,21 +200,8 @@ handle_call(_Request, _From, State) ->
 -spec handle_cast(Msg :: term(), state()) ->
                          {'noreply', state()} |
                          {stop, Reason :: term(), state()}.
-handle_cast({stop, Reason}, State) ->
-    {stop, Reason, State};
-handle_cast(Message, #{react := React} = State) ->
-    case catch React({xlx, Message}, State) of
-        {'EXIT', Reason} ->
-            {stop, Reason, State#{status => exception}};
-        {ok, NewState} ->
-            {noreply, NewState};
-        {ok, _, NewState} ->
-            {noreply, NewState};
-        Stop ->
-            Stop
-    end;
-handle_cast(_Msg, State) ->
-    {noreply, State}.
+handle_cast(Message, State) ->
+    handle_info({xlx, Message}, State).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -235,9 +213,18 @@ handle_cast(_Msg, State) ->
 -spec handle_info(Info :: term(), state()) ->
                          {'noreply', state()} |
                          {'stop', Reason :: term(), state()}.
+handle_info(Info,  State) ->
+    case handle(Info, State) of
+        {noreply, #{hibernate := Timeout} = S} ->
+            {noreply, S, Timeout};
+        Result ->
+            Result
+    end.
+
 %% do activity can be asyn version of entry to initialize the state.
 %% If there is no do activity, actions in react can be dynamic version of do.
-handle_info('_xlx_do_activity', #{do := _} = State) ->
+%% '_xlx_do_activity' must be the first message handled by gen_server.
+handle('_xlx_do_activity', #{do := _} = State) ->
     try do_activity(State) of
         {ok, S} ->
             {noreply, S};
@@ -246,34 +233,50 @@ handle_info('_xlx_do_activity', #{do := _} = State) ->
         Stop ->
             Stop
     catch
-        _Error: Reason ->
-            {stop, Reason, State#{status => exception}}
+        C:E ->
+            {stop, {C, E}, State#{status => exception}}
     end;
-handle_info({xlx, {stop, Reason}}, State) ->
+%% Stop machine message as system command bypass process of state machine.
+handle({xlx, stop}, State) ->
+    {stop, normal, State};
+handle({xlx, {stop, Reason}}, State) ->
     {stop, Reason, State};
-handle_info(Info, #{react := React} = State) ->
+%% Hibernate command, not guarantee.
+handle({xlx, hibernate}, State) ->
+    {noreply, State, hibernate};
+%% Timeout message treat as unconditional hibernate command.
+handle(timeout, State) ->
+    {noreply, State, hibernate};
+handle(Info, #{react := React} = State) ->
     try React(Info, State) of
         {ok, Reply, S} ->
             case Info of
-                {xlx, From, _} ->
-                    reply(From, Reply),
-                    {noreply, S};
+                {xlx, From, _} ->  % Relay the response
+                    reply(From, Reply);
                 _ ->
-                    {noreply, S}
-            end;
+                    ok
+            end,
+            {noreply, S};
         {ok, S} ->
             {noreply, S};
         Stop ->
             Stop
     catch
-        _Error: Reason ->
-            {stop, Reason, State#{status => exception}}
+        C:E ->
+            {stop, {C, E}, State#{status => exception}}
     end;
-%% worker is existed
-handle_info({'EXIT', From, Output}, #{worker := From} = State) ->
+%% Worker is existed
+handle({'EXIT', From, Output}, #{worker := From} = State) ->
     done(Output, State);
-handle_info(_Info, State) ->
-    {noreply, State}.  % todo: add hibernate parameter for state without handle.
+%% Relay request to worker process if react action is not existed.
+handle(Info, #{worker := From} = State) ->
+    From ! Info,
+    {noreply, State};
+handle({xlx, From, _Request}, State) ->
+    reply(From, {error, no_handler}),  % Empty state, just be graceful.
+    {noreply, State};
+handle(_Info, State) ->
+    {noreply, State}.
 
 %%--------------------------------------------------------------------
 %% @private
