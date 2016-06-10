@@ -20,10 +20,15 @@ s2_entry(S) ->
 work_instantly(S) ->
     {stop, done, S#{output => pi}}.
     
-work_async(_S) ->
+work_async(S) ->
     receive
+        {xlx, From, detach} ->
+            xl_state:reply(From, {ok, ready}),
+            erlang:exit({stop, detaching});
         {xlx, {stop, _Reason}} ->
-            erlang:exit({stop, #{reason => finished, done => pi}})
+            erlang:exit({stop, #{reason => finished, done => pi}});
+        _Unknown ->
+            work_async(S)
     end.
 
 work_sync(#{fsm := Fsm, state_name := Name} = S) ->
@@ -37,12 +42,16 @@ s_react({xlx, _, "error_test"}, #{counter := Count}) when Count =:= 2 ->
 s_react({xlx, _, "error_test"}, S) ->
     Count = maps:get(counter, S, 0),
     {ok, Count + 1, S#{counter => Count + 1}};
+%% transfer
 s_react(transfer, S) ->
     {stop, transfer, S};
-s_react({xlx, _, {get, state}}, S) ->
-    {ok, maps:get(state_name, S), S};
 s_react({xlx, {transfer, Next}}, S) ->
     {stop, transfer, S#{sign => Next}};
+%% detach
+s_react({xlx, detach}, S) ->
+    {ok, ready, S};
+s_react({xlx, _, {get, state}}, S) ->
+    {ok, maps:get(state_name, S), S};
 s_react(_, S) ->  % drop unknown message.
     {ok, S}.
 
@@ -132,6 +141,17 @@ fsm_test_cases(Fsm) ->
     gen_server:cast(Pid, {transfer, s4}),
     timer:sleep(10),
     ?assertMatch(state4, xl_state:call(Pid, {get, state})),
+    %% detach and resume
+    {ok, FsmData} = xl_state:call(Pid, detach),
+    ?assertMatch(#{status := running}, FsmData),
+    receive
+        {'EXIT', Pid, {detached, F}} ->
+            ?assert(F =:= FsmData)
+    end,
+    {ok, NewPid} = xl_state:start_link(FsmData),
+    fsm_test_detach(NewPid).
+
+fsm_test_detach(Pid) ->
     gen_server:cast(Pid, {transfer, s5}),
     timer:sleep(10),
     ?assertMatch(state5, xl_state:call(Pid, {get, state})),
@@ -150,11 +170,11 @@ fsm_test_cases(Fsm) ->
     case maps:get(max_traces, Final, infinity) of
         infinity ->  % recovery_test: 1->*2->2->2->4->5->3->*2->2 =>2
             ?assertMatch(s1, Sign),
-            ?assertMatch(#{step := 10}, Final),
-            ?assertMatch(7, length(Trace));
+            ?assertMatch(#{step := 11}, Final),
+            ?assertMatch(8, length(Trace));
         MaxTrace ->  % fsm_test: 1->*2->2->2->4->5->3->*2->3->3 =>2
             ?assertMatch(s1, Sign),
-            ?assertMatch(#{step := 11, new_data := 1}, Final),
+            ?assertMatch(#{step := 12, new_data := 1}, Final),
             ?assertMatch(MaxTrace, length(Trace))
     end.
 

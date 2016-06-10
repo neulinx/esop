@@ -160,6 +160,9 @@ create(Module, Data) when is_list(Data) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec init(state()) -> {'ok', state()} | {'stop', output()}.
+init(#{status := running} = State) ->  % Nothing to do for suspended state.
+    self() ! '_xlx_do_activity',
+    {ok, State#{pid => self()}};
 init(State) ->
     EntryTime = erlang:system_time(),
     Hib = maps:get(hibernate, State, infinity),
@@ -221,63 +224,6 @@ handle_info(Info,  State) ->
             Result
     end.
 
-%% do activity can be asyn version of entry to initialize the state.
-%% If there is no do activity, actions in react can be dynamic version of do.
-%% '_xlx_do_activity' must be the first message handled by gen_server.
-handle('_xlx_do_activity', #{do := _} = State) ->
-    try do_activity(State) of
-        {ok, S} ->
-            {noreply, S};
-        {ok, Result, S} ->
-            {noreply, S#{output => Result}};
-        Stop ->
-            Stop
-    catch
-        C:E ->
-            {stop, {C, E}, State#{status => exception}}
-    end;
-%% Stop machine message as system command bypass process of state machine.
-handle({xlx, stop}, State) ->
-    {stop, normal, State};
-handle({xlx, {stop, Reason}}, State) ->
-    {stop, Reason, State};
-%% Hibernate command, not guarantee.
-handle({xlx, hibernate}, State) ->
-    {noreply, State, hibernate};
-%% Timeout message treat as unconditional hibernate command.
-handle(timeout, State) ->
-    {noreply, State, hibernate};
-handle(Info, #{react := React} = State) ->
-    try React(Info, State) of
-        {ok, Reply, S} ->
-            case Info of
-                {xlx, From, _} ->  % Relay the response
-                    reply(From, Reply);
-                _ ->
-                    ok
-            end,
-            {noreply, S};
-        {ok, S} ->
-            {noreply, S};
-        Stop ->
-            Stop
-    catch
-        C:E ->
-            {stop, {C, E}, State#{status => exception}}
-    end;
-%% Worker is existed
-handle({'EXIT', From, Output}, #{worker := From} = State) ->
-    done(Output, State);
-%% Relay request to worker process if react action is not existed.
-handle(Info, #{worker := From} = State) ->
-    From ! Info,
-    {noreply, State};
-handle({xlx, From, _Request}, State) ->
-    reply(From, {error, no_handler}),  % Empty state, just be graceful.
-    {noreply, State};
-handle(_Info, State) ->
-    {noreply, State}.
-
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
@@ -290,8 +236,10 @@ handle(_Info, State) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec terminate(Reason :: term(), state()) -> no_return().
+terminate(xlx_detach, State) ->  % Do nothing for detaching.
+    erlang:exit({detached, State});
 terminate(Reason, State) ->
-    exit(leave(State, Reason)).
+    erlang:exit(leave(State, Reason)).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -312,11 +260,11 @@ reply({To, Tag}, Reply) ->
     ok.
 
 %% Same as gen_server:call().
--spec call(process(), request()) -> Reply :: term().
+-spec call(process(), Request :: term()) -> Reply :: term().
 call(Process, Command) ->
     call(Process, Command, infinity).
 
--spec call(process(), request(), timeout()) -> Reply :: term().
+-spec call(process(), Request :: term(), timeout()) -> Reply :: term().
 call(Process, Command, Timeout) ->
     Tag = make_ref(),
     Process ! {xlx, {self(), Tag}, Command},
@@ -325,7 +273,7 @@ call(Process, Command, Timeout) ->
             Result
     after
         Timeout ->
-            exit(timeout)
+            erlang:exit(timeout)
     end.
 
 %% Same as gen_server:cast().
@@ -353,7 +301,7 @@ stop(Process, Reason, Timeout) ->
     after
         Timeout ->
             demonitor(Mref, [flush]),
-            exit(timeout)
+            erlang:exit(timeout)
     end.
 
 %%%===================================================================
@@ -392,6 +340,116 @@ leave(State, Reason) ->
         _ ->  % running or undefined
             {Sign, FinalState#{status := stopped}}
     end.
+
+%% do activity can be asyn version of entry to initialize the state.
+%% If there is no do activity, actions in react can be dynamic version of do.
+%% '_xlx_do_activity' must be the first message handled by gen_server.
+handle('_xlx_do_activity', #{do := _} = State) ->
+    try do_activity(State) of
+        {ok, S} ->
+            {noreply, S};
+        {ok, Result, S} ->
+            {noreply, S#{output => Result}};
+        Stop ->
+            Stop
+    catch
+        C:E ->
+            {stop, {C, E}, State#{status => exception}}
+    end;
+%% Stop machine message as system command bypass process of state machine.
+handle({xlx, stop}, State) ->
+    {stop, normal, State};
+handle({xlx, {stop, Reason}}, State) ->
+    {stop, Reason, State};
+%% Hibernate command, not guarantee.
+handle({xlx, hibernate}, State) ->
+    {noreply, State, hibernate};
+%% Timeout message treat as unconditional hibernate command.
+handle(timeout, State) ->
+    {noreply, State, hibernate};
+%% Detach data and deactivate the state.
+handle({xlx, From, detach}, State) ->
+    case detach(State) of
+        {ok, ready, S} ->
+            reply(From, {ok, S}),
+            {stop, xlx_detach, S};
+        {ok, not_ready, S} ->
+            reply(From, {error, not_ready}),
+            {noreply, S};
+        {ok, S} ->  % Do not care, default as not ready.
+            reply(From, {error, not_ready}),
+            {noreply, S};
+        {stop, Reason, _S} = Stop ->
+            reply(From, {error, Reason}),
+            Stop
+    end;
+handle(Info, #{react := React} = State) ->
+    try React(Info, State) of
+        {ok, Reply, S} ->
+            case Info of
+                {xlx, From, _} ->  % Relay the response
+                    reply(From, Reply);
+                _ ->
+                    ok
+            end,
+            {noreply, S};
+        {ok, S} ->
+            {noreply, S};
+        Stop ->
+            Stop
+    catch
+        C:E ->
+            {stop, {C, E}, State#{status => exception}}
+    end;
+%% Worker is existed
+handle({'EXIT', From, Output}, #{worker := From} = State) ->
+    done(Output, State);
+%% Relay request to worker process if react action is not existed.
+handle(Info, #{worker := From} = State) ->
+    From ! Info,
+    {noreply, State};
+handle({xlx, From, _Request}, State) ->
+    reply(From, {error, no_handler}),  % Empty state, just be graceful.
+    {noreply, State};
+handle(_Info, State) ->
+    {noreply, State}.
+
+detach(State) ->
+    case maps:find(react, State) of
+        {ok, React} ->
+            try React({xlx, detach}, State) of
+                {ok, ready, S} ->
+                    detach_(S);
+                NotReady ->
+                    NotReady
+            catch
+                C:E ->
+                    {stop, {C, E}, State#{status => exception}}
+            end;
+        error ->
+            detach_(State)
+    end.
+
+detach_(#{worker := Worker} = State) ->
+    case is_process_alive(Worker) of
+        true->
+            Timeout = maps:get(timeout, State, infinity),
+            try call(Worker, detach, Timeout) of
+                {ok, ready, #{} = Supplement} ->
+                    {ok, ready, maps:merge(State, Supplement)};
+                {ok, ready} ->
+                    {ok, ready, State};
+                NotReady ->
+                    NotReady
+            catch
+                {exit, timeout} ->
+                    {ok, not_ready, State}
+            end;
+        false ->
+            {ok, ready, State}
+    end;
+detach_(State) ->
+    {ok, ready, State}.
 
 do_activity(#{do := Do} = State) ->
     case maps:get(work_mode, State, sync) of
