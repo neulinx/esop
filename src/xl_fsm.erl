@@ -118,16 +118,15 @@ on_command(_Command, Fsm) ->
 on_notify(Info, #{status := failover} = Fsm) ->
     pending(Info, Fsm);
 %% Detach command cause FSM stop and thow current FSM data dehydrated.
-on_notify({_, detach}, #{state_pid := Pid, status := running} = Fsm) ->
+on_notify({_, {stop, xlx_detach}},
+          #{state_pid := Pid, status := running} = Fsm) ->
     Timeout = maps:get(timeout, Fsm, infinity),
-    case xl_state:call(Pid, detach, Timeout) of
-        {ok, State} ->
-            {ok, ready, Fsm#{state => State}};
+    case xl_state:detach(Pid, Timeout) of
+        {detached, State} ->
+            {ok, Fsm#{state => State}};
         NotReady ->
-            NotReady
+            {stop, {error, NotReady}, Fsm}
     end;
-on_notify({_, detach}, #{status := running} = Fsm) ->
-    {ok, ready, Fsm};
 on_notify(Info, #{state_pid := Pid,
                   status := running} = Fsm) ->
     Pid ! Info,

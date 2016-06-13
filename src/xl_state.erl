@@ -17,7 +17,7 @@
 %% API
 -export([start_link/1, start_link/2, start_link/3]).
 -export([start/1, start/2, start/3]).
--export([stop/1, stop/2, stop/3]).
+-export([stop/1, stop/2, stop/3, detach/1, detach/2]).
 -export([create/1, create/2]).
 -export([call/2, call/3, cast/2, reply/2]).
 
@@ -25,6 +25,7 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
+-define(DFL_TIMEOUT, 4000).  %% Smaller than gen:call timeout.
 %%%===================================================================
 %%% Common types
 %%%===================================================================
@@ -54,9 +55,9 @@
              'work_mode' => work_mode(),  % default: sync
              'worker' => pid(),
              'pid' => pid(),  % mandatory
-             'timeout' => timeout(),  % default: infinity
+             'timeout' => timeout(),  % default: 5000
              'hibernate' => timeout(),  % mandatory, default: infinity
-             'reason' => term(),
+             'reason' => reason(),
              'sign' => term(),
              'output' => term(),
              'status' => status()
@@ -70,20 +71,21 @@
 -type output() :: {'stopped', state()} |
                   {'exception', state()} |
                   {Sign :: term(), state()}.
--type fail() :: {'stop', Reason :: term(), Result :: term(), state()} |
-                {'stop', Reason :: term(), state()}.
+-type fail() :: {'stop', reason(), Result :: term(), state()} |
+                {'stop', reason(), state()}.
 -type status() :: 'running' |
                   'stopped' |
                   'exception' |
                   'undefined' |
                   'failover'.
 -type work_mode() :: 'async' | 'sync'.
+-type reason() :: 'normal' | 'detach' | term(). 
 -type entry() :: fun((state()) -> ok() | fail()).
 -type exit() :: fun((state()) -> output()).
 -type react() :: fun((message() | term(), state()) -> ok() | fail()).
 -type do() :: fun((state()) -> ok() | fail() | no_return()).
 %% work done output on async mode:
-%% {ok, map()} | {ok, Result::term()} | {stop, Reason :: term()}
+%% {ok, map()} | {ok, Result::term()} | {stop, reason()}
 
 %%%===================================================================
 %%% API
@@ -165,7 +167,7 @@ init(#{status := running} = State) ->  % Nothing to do for suspended state.
     {ok, State#{pid => self()}};
 init(State) ->
     EntryTime = erlang:system_time(),
-    Hib = maps:get(hibernate, State, infinity),
+    Hib = maps:get(hibernate, State, ?DFL_TIMEOUT),
     State1 = State#{entry_time => EntryTime, pid =>self(), hibernate => Hib},
     case enter(State1) of
         {ok, S} ->
@@ -187,8 +189,8 @@ init(State) ->
 -spec handle_call(term(), from(), state()) ->
                          {'reply', Reply :: term(), state()} |
                          {'noreply', state()} |
-                         {stop, Reason :: term(), Reply :: term(), state()} |
-                         {stop, Reason :: term(), state()}.
+                         {stop, reason(), Reply :: term(), state()} |
+                         {stop, reason(), state()}.
 handle_call(Request, From, State) ->
     handle_info({xlx, From, Request}, State).
 
@@ -202,7 +204,7 @@ handle_call(Request, From, State) ->
 %%--------------------------------------------------------------------
 -spec handle_cast(Msg :: term(), state()) ->
                          {'noreply', state()} |
-                         {stop, Reason :: term(), state()}.
+                         {stop, reason(), state()}.
 handle_cast(Message, State) ->
     handle_info({xlx, Message}, State).
 
@@ -215,7 +217,7 @@ handle_cast(Message, State) ->
 %%--------------------------------------------------------------------
 -spec handle_info(Info :: term(), state()) ->
                          {'noreply', state()} |
-                         {'stop', Reason :: term(), state()}.
+                         {'stop', reason(), state()}.
 handle_info(Info,  State) ->
     case handle(Info, State) of
         {noreply, #{hibernate := Timeout} = S} ->
@@ -235,9 +237,7 @@ handle_info(Info,  State) ->
 %%  exit(state()) -> output().
 %% @end
 %%--------------------------------------------------------------------
--spec terminate(Reason :: term(), state()) -> no_return().
-terminate(xlx_detach, State) ->  % Do nothing for detaching.
-    erlang:exit({detached, State});
+-spec terminate(reason(), state()) -> no_return().
 terminate(Reason, State) ->
     erlang:exit(leave(State, Reason)).
 
@@ -262,7 +262,7 @@ reply({To, Tag}, Reply) ->
 %% Same as gen_server:call().
 -spec call(process(), Request :: term()) -> Reply :: term().
 call(Process, Command) ->
-    call(Process, Command, infinity).
+    call(Process, Command, ?DFL_TIMEOUT).
 
 -spec call(process(), Request :: term(), timeout()) -> Reply :: term().
 call(Process, Command, Timeout) ->
@@ -285,13 +285,13 @@ cast(Process, Notification) ->
 %% stop is almost same effect as gen_server:stop().
 -spec stop(process()) -> output().
 stop(Process) ->
-    stop(Process, normal, infinity).
+    stop(Process, normal, ?DFL_TIMEOUT).
 
--spec stop(process(), Reason :: term()) -> output().
+-spec stop(process(), reason()) -> output().
 stop(Process, Reason) ->
-    stop(Process, Reason, infinity).
+    stop(Process, Reason, ?DFL_TIMEOUT).
 
--spec stop(process(), Reason :: term(), timeout()) -> output().
+-spec stop(process(), reason(), timeout()) -> output().
 stop(Process, Reason, Timeout) ->
     Mref = monitor(process, Process),
     cast(Process, {stop, Reason}),
@@ -303,6 +303,13 @@ stop(Process, Reason, Timeout) ->
             demonitor(Mref, [flush]),
             erlang:exit(timeout)
     end.
+
+-spec detach(process()) -> {'detached', state()} | term().
+detach(Process) ->
+    stop(Process, xlx_detach, ?DFL_TIMEOUT).
+-spec detach(process(), timeout()) -> {'detached', state()} | term().
+detach(Process, Timeout) ->
+    stop(Process, xlx_detach, Timeout).
 
 %%%===================================================================
 %%% Internal functions
@@ -320,20 +327,31 @@ enter(#{entry := Entry} = State) ->
 enter(State) ->
     {ok, State}.
 
+leave(State, xlx_detach) ->  % detach command do not call exit action.
+    Sdetach = case ensure_stopped(State, xlx_detach) of
+            stopped ->
+                State;
+            killed ->
+                State#{output => abort};
+            {noreply, S} ->
+                S;
+            {stop, _, S} ->
+                S
+        end,
+    {detached, Sdetach};
 leave(State, Reason) ->
-    S1 = State#{reason => Reason},
-    S2 = case stop_work(S1, Reason) of
-             stopped ->
-                 S1;
-             killed ->
-                 S1#{output => abort};
-             {noreply, S0} ->
-                 S0;
-             {stop, _, S0} ->
-                 S0
-         end,
-    {Sign, S3} = try_exit(S2),
-    FinalState = S3#{exit_time => erlang:system_time()},
+    {Sign, Sexit} = try_exit(State#{reason => Reason}),
+    Sstop = case ensure_stopped(Sexit, Reason) of
+            stopped ->
+                Sexit;
+            killed ->
+                Sexit#{output => abort};
+            {noreply, S} ->
+                S;
+            {stop, _, S} ->
+                S
+        end,
+    FinalState = Sstop#{exit_time => erlang:system_time()},
     case maps:find(status, FinalState) of
         {ok, Status} when Status =/= running ->
             {Sign, FinalState};
@@ -356,40 +374,22 @@ handle('_xlx_do_activity', #{do := _} = State) ->
         C:E ->
             {stop, {C, E}, State#{status => exception}}
     end;
-%% Stop machine message as system command bypass process of state machine.
-handle({xlx, stop}, State) ->
-    {stop, normal, State};
-handle({xlx, {stop, Reason}}, State) ->
-    {stop, Reason, State};
-%% Hibernate command, not guarantee.
-handle({xlx, hibernate}, State) ->
-    {noreply, State, hibernate};
+%% Worker is existed
+handle({'EXIT', From, Output}, #{worker := From} = State) ->
+    done(Output, State);
 %% Timeout message treat as unconditional hibernate command.
 handle(timeout, State) ->
-    {noreply, State, hibernate};
-%% Detach data and deactivate the state.
-handle({xlx, From, detach}, State) ->
-    case detach(State) of
-        {ok, ready, S} ->
-            reply(From, {ok, S}),
-            {stop, xlx_detach, S};
-        {ok, not_ready, S} ->
-            reply(From, {error, not_ready}),
-            {noreply, S};
-        {ok, S} ->  % Do not care, default as not ready.
-            reply(From, {error, not_ready}),
-            {noreply, S};
-        {stop, Reason, _S} = Stop ->
-            reply(From, {error, Reason}),
-            Stop
-    end;
-handle(Info, #{react := React} = State) ->
+    handle({xlx, hibernate}, State);
+handle(Info, State) ->
+    post_(Info, handle_(Info, State)).
+
+handle_(Info, #{react := React} = State) ->
     try React(Info, State) of
         {ok, Reply, S} ->
             case Info of
                 {xlx, From, _} ->  % Relay the response
                     reply(From, Reply);
-                _ ->
+                _ ->  % Drop the reply part without From tag.
                     ok
             end,
             {noreply, S};
@@ -401,55 +401,22 @@ handle(Info, #{react := React} = State) ->
         C:E ->
             {stop, {C, E}, State#{status => exception}}
     end;
-%% Worker is existed
-handle({'EXIT', From, Output}, #{worker := From} = State) ->
-    done(Output, State);
-%% Relay request to worker process if react action is not existed.
-handle(Info, #{worker := From} = State) ->
-    From ! Info,
-    {noreply, State};
-handle({xlx, From, _Request}, State) ->
+handle_({xlx, From, _Request}, State) ->
     reply(From, {error, no_handler}),  % Empty state, just be graceful.
     {noreply, State};
-handle(_Info, State) ->
+handle_(_Info, State) ->
     {noreply, State}.
 
-detach(State) ->
-    case maps:find(react, State) of
-        {ok, React} ->
-            try React({xlx, detach}, State) of
-                {ok, ready, S} ->
-                    detach_(S);
-                NotReady ->
-                    NotReady
-            catch
-                C:E ->
-                    {stop, {C, E}, State#{status => exception}}
-            end;
-        error ->
-            detach_(State)
-    end.
-
-detach_(#{worker := Worker} = State) ->
-    case is_process_alive(Worker) of
-        true->
-            Timeout = maps:get(timeout, State, infinity),
-            try call(Worker, detach, Timeout) of
-                {ok, ready, #{} = Supplement} ->
-                    {ok, ready, maps:merge(State, Supplement)};
-                {ok, ready} ->
-                    {ok, ready, State};
-                NotReady ->
-                    NotReady
-            catch
-                {exit, timeout} ->
-                    {ok, not_ready, State}
-            end;
-        false ->
-            {ok, ready, State}
-    end;
-detach_(State) ->
-    {ok, ready, State}.
+%% Stop machine message as system command bypass process of state machine.
+post_({xlx, stop}, {noreply, State}) ->
+    {stop, normal, State};
+post_({xlx, {stop, Reason}}, {noreply, State}) ->
+    {stop, Reason, State};
+%% Hibernate command, not guarantee.
+post_({xlx, hibernate}, {noreply, State}) ->
+    {noreply, State, hibernate};
+post_(_Info, Result) ->
+    Result.
 
 do_activity(#{do := Do} = State) ->
     case maps:get(work_mode, State, sync) of
@@ -478,11 +445,10 @@ done({stop, Reason}, State) ->
 done(Exception, State) ->
     {stop, Exception, State#{status := exception}}.
 
-
-stop_work(#{worker := Worker} = State, Reason) ->
+ensure_stopped(#{worker := Worker} = State, Reason) ->
     case is_process_alive(Worker) of
         true->
-            Timeout = maps:get(timeout, State, infinity),
+            Timeout = maps:get(timeout, State, ?DFL_TIMEOUT),
             try
                 done(stop(Worker, Reason, Timeout), State)
             catch
@@ -493,15 +459,16 @@ stop_work(#{worker := Worker} = State, Reason) ->
         false ->
             stopped
     end;
-stop_work(_, _) ->
+ensure_stopped(_, _) ->
     stopped.
 
 try_exit(#{exit := Exit} = State) ->
-    case catch Exit(State) of
-        {'EXIT', _} ->
-            {exception, State#{status := exception}};
+    try Exit(State) of
         Result ->
             Result
+    catch
+        C:E ->
+            {exception, State#{reason => {C, E}, status := exception}}
     end;
 try_exit(#{status := exception} = State) ->
     {exception, State};
