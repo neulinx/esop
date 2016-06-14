@@ -17,6 +17,8 @@
 -endif.
 
 -define(RETRY_INTERVAL, 5).
+-define(DFL_TIMEOUT, 4500).
+-define(MAX_TRACES, 1000).
 %%%===================================================================
 %%% Common types
 %%%===================================================================
@@ -120,7 +122,7 @@ on_notify(Info, #{status := failover} = Fsm) ->
 %% Detach command cause FSM stop and thow current FSM data dehydrated.
 on_notify({_, {stop, xlx_detach}},
           #{state_pid := Pid, status := running} = Fsm) ->
-    Timeout = maps:get(timeout, Fsm, infinity),
+    Timeout = maps:get(timeout, Fsm, ?DFL_TIMEOUT),
     case xl_state:detach(Pid, Timeout) of
         {detached, State} ->
             {ok, Fsm#{state => State}};
@@ -275,7 +277,7 @@ stop_fsm(Fsm, _) ->
 stop_1(#{state_pid := Pid} = Fsm, Reason) ->
     case is_process_alive(Pid) of
         true->
-            Timeout = maps:get(timeout, Fsm, infinity),
+            Timeout = maps:get(timeout, Fsm, ?DFL_TIMEOUT),
             case catch xl_state:stop(Pid, Reason, Timeout) of
                 {'EXIT', timeout} ->
                     erlang:exit(Pid, kill),  % Mention case of trap exit.
@@ -293,7 +295,7 @@ archive(#{traces := Trace} = Fsm) when is_function(Trace) ->
     Trace(Fsm);
 archive(#{state := State} = Fsm)  ->
     Trace = maps:get(traces, Fsm, []),
-    Limit = maps:get(max_traces, Fsm, infinity),
+    Limit = maps:get(max_traces, Fsm, ?MAX_TRACES),
     Trace1 = enqueue(State, Trace, Limit),
     Fsm#{traces => Trace1};
 archive(Fsm) ->
