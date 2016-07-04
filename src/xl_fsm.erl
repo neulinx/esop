@@ -35,6 +35,7 @@
 -type states_table() :: #{From :: vector() => To :: state()}.
 -type states_fun() :: fun((From :: name(), sign()) -> To :: state()).
 -type rollback() :: 0 | neg_integer() | 'restart' | (Sign :: term()).
+%% imo, bad design. Low level design should avoid decision.
 -type recovery() :: rollback() |  % restore mode is default.
                     {rollback()} |  % restore
                     {rollback(), Mend :: map()} |  % restore
@@ -143,7 +144,10 @@ on_message(Info, #{status := failover} = Fsm) ->
 on_message({'EXIT', Pid, {D, S}}, #{state_pid := Pid} = Fsm) ->
     transfer(Fsm#{state := S}, D);
 on_message({'EXIT', Pid, Exception}, #{state_pid := Pid} = Fsm) ->
-    transfer(Fsm#{reason => Exception}, exception); 
+    transfer(Fsm#{reason => Exception}, exception);
+%% Unknown EXIT signal. Stop FSM for OTP principles.
+on_message({'EXIT', _, _} = Kill, Fsm) ->
+    {stop, Kill, Fsm};
 on_message(Message, #{status := running,
                       state_pid := Pid} = Fsm) ->
     Pid ! Message,

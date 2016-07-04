@@ -401,6 +401,9 @@ handle_(Info, #{react := React} = State) ->
         C:E ->
             {stop, {C, E}, State#{status => exception}}
     end;
+%% Gracefully leave state when receive unhandled EXIT signal.
+handle_({'EXIT', _, _} = Kill, State) ->
+    {stop, Kill, State};
 handle_({xlx, From, _Request}, State) ->
     reply(From, {error, no_handler}),  % Empty state, just be graceful.
     {noreply, State};
