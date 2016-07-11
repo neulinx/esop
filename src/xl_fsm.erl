@@ -124,12 +124,12 @@ on_command(_Command, Fsm) ->
 %% Queue the notification received in failover status.
 on_notify(Info, #{status := failover} = Fsm) ->
     pending(Info, Fsm);
-%% Detach command cause FSM stop and thow current FSM data dehydrated.
-on_notify({_, {stop, xlx_detach}},
+%% Unload command cause FSM stop and thow current FSM data dehydrated.
+on_notify({_, {stop, xlx_unload}},
           #{state_pid := Pid, status := running} = Fsm) ->
     Timeout = maps:get(timeout, Fsm, ?DFL_TIMEOUT),
-    case xl_state:detach(Pid, Timeout) of
-        {detached, State} ->
+    case xl_state:unload(Pid, Timeout) of
+        {unloaded, State} ->
             {ok, Fsm#{state => State}};
         NotReady ->
             {stop, {error, NotReady}, Fsm}

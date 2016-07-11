@@ -22,8 +22,8 @@ work_instantly(S) ->
     
 work_async(S) ->
     receive
-        {xlx, {stop, xlx_detach}} ->
-            erlang:exit({stop, detaching});
+        {xlx, {stop, xlx_unload}} ->
+            erlang:exit({stop, unloading});
         {xlx, {stop, Reason}} ->
             erlang:exit({stop, #{reason => Reason, done => pi}});
         _Unknown ->
@@ -139,11 +139,11 @@ fsm_test_cases(Fsm) ->
     gen_server:cast(Pid, {transfer, s4}),
     timer:sleep(10),
     ?assertMatch(state4, xl_state:call(Pid, {get, state})),
-    %% detach and resume
-    {detached, FsmData} = xl_state:detach(Pid),
+    %% unload and resume
+    {unloaded, FsmData} = xl_state:unload(Pid),
     ?assertMatch(#{status := running}, FsmData),
     receive
-        {'EXIT', Pid, {detached, F}} ->
+        {'EXIT', Pid, {unloaded, F}} ->
             ?assert(F =:= FsmData)
     end,
     {ok, NewPid} = xl_state:start_link(FsmData),

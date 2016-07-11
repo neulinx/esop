@@ -17,7 +17,7 @@
 %% API
 -export([start_link/1, start_link/2, start_link/3]).
 -export([start/1, start/2, start/3]).
--export([stop/1, stop/2, stop/3, detach/1, detach/2]).
+-export([stop/1, stop/2, stop/3, unload/1, unload/2]).
 -export([create/1, create/2]).
 -export([call/2, call/3, cast/2, reply/2]).
 
@@ -79,7 +79,7 @@
                   'undefined' |
                   'failover'.
 -type work_mode() :: 'async' | 'sync'.
--type reason() :: 'normal' | 'detach' | term(). 
+-type reason() :: 'normal' | 'unload' | term(). 
 -type entry() :: fun((state()) -> ok() | fail()).
 -type exit() :: fun((state()) -> output()).
 -type react() :: fun((message() | term(), state()) -> ok() | fail()).
@@ -329,8 +329,8 @@ done(Exception, State) ->
 terminate(Reason, State) ->
     erlang:exit(leave(State, Reason)).
 
-leave(State, xlx_detach) ->  % detach command do not call exit action.
-    Sdetach = case ensure_stopped(State, xlx_detach) of
+leave(State, xlx_unload) ->  % unload command do not call exit action.
+    Sunload = case ensure_stopped(State, xlx_unload) of
             stopped ->
                 State;
             killed ->
@@ -340,7 +340,7 @@ leave(State, xlx_detach) ->  % detach command do not call exit action.
             {stop, _, S} ->
                 S
         end,
-    {detached, Sdetach};
+    {unloaded, Sunload};
 leave(State, Reason) ->
     {Sign, Sexit} = try_exit(State#{reason => Reason}),
     Sstop = case ensure_stopped(Sexit, Reason) of
@@ -457,12 +457,12 @@ stop(Process, Reason, Timeout) ->
     end.
 
 %% Unload context data from engine.
--spec detach(process()) -> {'detached', state()} | term().
-detach(Process) ->
-    stop(Process, xlx_detach, ?DFL_TIMEOUT).
--spec detach(process(), timeout()) -> {'detached', state()} | term().
-detach(Process, Timeout) ->
-    stop(Process, xlx_detach, Timeout).
+-spec unload(process()) -> {'unloaded', state()} | term().
+unload(Process) ->
+    stop(Process, xlx_unload, ?DFL_TIMEOUT).
+-spec unload(process(), timeout()) -> {'unloaded', state()} | term().
+unload(Process, Timeout) ->
+    stop(Process, xlx_unload, Timeout).
 
 %%%===================================================================
 %%% Unit test
