@@ -30,7 +30,7 @@ work_async(S) ->
             work_async(S)
     end.
 
-work_sync(#{fsm := Fsm, state_name := Name} = S) ->
+work_sync(#{actor := Fsm, state_name := Name} = S) ->
     S0 = xl_state:call(Fsm, state),
     ?assertMatch(#{state_name := Name}, S0),
     {ok, pi, S}.

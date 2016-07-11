@@ -29,7 +29,7 @@
 -type vector() :: {name(), sign()} | (FromRoot :: sign()).
 -type limit() :: pos_integer() | 'infinity'.
 -type state() :: #{'state_name' => term(),  % mandatory
-                   'fsm' => pid()} % mandatory
+                   'actor' => pid() | atom()} % mandatory
                | xl_state:state().
 -type states() :: states_table() | states_fun().
 -type states_table() :: #{From :: vector() => To :: state()}.
@@ -44,6 +44,7 @@
 -type fsm() :: #{'state' => state(),
                  'states' => states(),
                  'state_pid' => pid(),
+                 'actor' => pid() | atom(),
                  'step' => non_neg_integer(),
                  'max_steps' => limit(),
                  'recovery' => recovery(),
@@ -190,7 +191,8 @@ transfer({stop, _, _} = Stop) ->
 transfer({ok, NewState, Fsm}) ->
     F1 = archive(Fsm),  % archive successful states only.
     F2 = F1#{state => NewState},  % Keep the initial state in Fsm.
-    case xl_state:start_link(NewState#{fsm => self()}) of
+    Actor = maps:get(actor, F2, self()),
+    case xl_state:start_link(NewState#{actor => Actor}) of
         {ok, Pid} ->
             {ok, F2#{state_pid => Pid}};
         {error, {Sign, State}} ->
