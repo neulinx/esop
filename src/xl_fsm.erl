@@ -19,9 +19,10 @@
 -define(RETRY_INTERVAL, 5).
 -define(DFL_TIMEOUT, 4500).
 -define(MAX_TRACES, 1000).
-%%%===================================================================
-%%% Common types
-%%%===================================================================
+
+%%--------------------------------------------------------------------
+%% Common types
+%%--------------------------------------------------------------------
 -export_type([fsm/0]).
 
 -type name() :: term().
@@ -60,9 +61,6 @@
 -type exit_ret() :: xl_state:output().
 -type react_ret() :: xl_state:ok() | xl_state:fail().
 
-%%%===================================================================
-%%% API
-%%%===================================================================
 %%--------------------------------------------------------------------
 %% @doc
 %% Actions of state.
@@ -82,11 +80,12 @@ exit(Fsm) ->
     Reason = maps:get(reason, Fsm, normal),
     stop_fsm(Fsm, Reason).
 
-%%%===================================================================
-%%% Internal functions
-%%%===================================================================
+%%--------------------------------------------------------------------
+%% There is a graph structure in states set.
+%%
 %% Sign must not be tuple type. Data in map should be {From, Sign} := To.
 %% The first level states may leave out vertex '_root' as Sign := To.
+%%--------------------------------------------------------------------
 next(#{state := State}, start) ->
     State;
 next(#{state := State, states := States}, Sign) ->
@@ -100,6 +99,10 @@ locate(States, Sign) when is_function(States) ->
 locate(States, Sign) ->
     maps:get(Sign, States).
 
+
+%%--------------------------------------------------------------------
+%% Divide messages into three types of handlers.
+%%--------------------------------------------------------------------
 process({xlx, _, _} = Command, Fsm) ->
     on_command(Command, Fsm);
 process({xlx, _} = Notification, Fsm) ->
@@ -156,6 +159,9 @@ on_message(Message, #{status := running,
 on_message(_, Fsm) ->
     {ok, Fsm}.
 
+%%--------------------------------------------------------------------
+%% Main part of FSM logic, state changing.
+%%--------------------------------------------------------------------
 pre_transfer(#{steps := Steps, max_steps := MaxSteps} = Fsm, _)
   when Steps >= MaxSteps ->
     pre_transfer(Fsm#{reason => out_of_steps}, exception);
@@ -200,7 +206,10 @@ transfer({ok, NewState, Fsm}) ->
         {error, Exception} ->  % For unhandled exceptions.
             transfer(F2#{reason => Exception}, exception)
     end.
-    
+
+%%--------------------------------------------------------------------
+%% Failover and recovery.
+%%-------------------------------------------------------------------- 
 %% To slow down the failover progress, retry operation always
 %% triggered by message.
 recover(#{retry_count := Count, max_retry := Max} = Fsm) when Count >= Max ->
@@ -259,12 +268,46 @@ reset_state(#{state := State, states := States} = Fsm) ->
     NewState = locate(States, Name),
     Fsm#{state := NewState}.
 
+%% Do not enqueue the message which crashed the state process.
+pending(_Request, #{max_pending_size := 0} = Fsm) ->
+    {ok, Fsm};
+pending(Request, #{max_pending_size := Max} = Fsm) ->
+    Q = maps:get(pending_queue, Fsm, []),
+    Q1 = enqueue(Request, Q, Max),
+    {ok, Fsm#{pending_queue => Q1}};
+pending(_Request, Fsm) ->
+    {ok, Fsm}.
+
+%%--------------------------------------------------------------------
+%% Operations of trace log for state transitions.
+%%--------------------------------------------------------------------
 history(Traces, N) when -N =< length(Traces) ->
     lists:nth(-N, Traces);
 history(Traces, N) when is_function(Traces) ->
     Traces(N);  % traces function must return out_of_range only on exception.
 history(_, _) ->
     out_of_range.
+
+archive(#{traces := Trace} = Fsm) when is_function(Trace) ->
+    Trace(Fsm);
+archive(#{state := State} = Fsm)  ->
+    Trace = maps:get(traces, Fsm, []),
+    Limit = maps:get(max_traces, Fsm, ?MAX_TRACES),
+    Trace1 = enqueue(State, Trace, Limit),
+    Fsm#{traces => Trace1};
+archive(Fsm) ->
+    Fsm.
+
+enqueue(_Item, _Queue, 0) ->
+    [];
+enqueue(Item, Queue, infinity) ->
+    [Item | Queue];
+enqueue(Item, Queue, Limit) ->
+    lists:sublist([Item | Queue], Limit).
+
+%%--------------------------------------------------------------------
+%% Stop FSM and throw output.
+%%--------------------------------------------------------------------
 
 stop_fsm(#{status := running} = Fsm, Reason) ->
     case stop_1(Fsm, Reason) of
@@ -296,33 +339,6 @@ stop_1(#{state_pid := Pid} = Fsm, Reason) ->
     end;
 stop_1(Fsm, _) ->
     {stopped, Fsm}.
-
-archive(#{traces := Trace} = Fsm) when is_function(Trace) ->
-    Trace(Fsm);
-archive(#{state := State} = Fsm)  ->
-    Trace = maps:get(traces, Fsm, []),
-    Limit = maps:get(max_traces, Fsm, ?MAX_TRACES),
-    Trace1 = enqueue(State, Trace, Limit),
-    Fsm#{traces => Trace1};
-archive(Fsm) ->
-    Fsm.
-
-enqueue(_Item, _Queue, 0) ->
-    [];
-enqueue(Item, Queue, infinity) ->
-    [Item | Queue];
-enqueue(Item, Queue, Limit) ->
-    lists:sublist([Item | Queue], Limit).
-
-%% Do not enqueue the message which crashed the state process.
-pending(_Request, #{max_pending_size := 0} = Fsm) ->
-    {ok, Fsm};
-pending(Request, #{max_pending_size := Max} = Fsm) ->
-    Q = maps:get(pending_queue, Fsm, []),
-    Q1 = enqueue(Request, Q, Max),
-    {ok, Fsm#{pending_queue => Q1}};
-pending(_Request, Fsm) ->
-    {ok, Fsm}.
 
 %%%===================================================================
 %%% Unit test. If code lines of unit tests are more than 100, 

@@ -87,10 +87,6 @@
 %% work done output on async mode:
 %% {ok, map()} | {ok, Result::term()} | {stop, reason()}
 
-%%%===================================================================
-%%% API
-%%%===================================================================
-
 %%--------------------------------------------------------------------
 %% Starts the server.
 %%--------------------------------------------------------------------
@@ -158,16 +154,8 @@ create(Module, Data) when is_map(Data) ->
 create(Module, Data) when is_list(Data) ->
     create(Module, maps:from_list(Data)).
 
-%%%===================================================================
-%%% gen_server callbacks
-%%%===================================================================
-
 %%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Initializes the server with state action entry:
-%%   entry(state()) -> ok() | fail().
-%% @end
+%% gen_server callback. Initializes the server with state action entry.
 %%--------------------------------------------------------------------
 -spec init(state()) -> {'ok', state()} | {'stop', output()}.
 init(#{status := running} = State) ->  % Nothing to do for suspended state.
@@ -187,141 +175,6 @@ init(State) ->
             {ok, S}
     end.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling call messages by relay to react function.
-%%   react(Message :: term(), state()) -> ok() | fail().
-%% @end
-%%--------------------------------------------------------------------
--spec handle_call(term(), from(), state()) ->
-                         {'reply', Reply :: term(), state()} |
-                         {'noreply', state()} |
-                         {stop, reason(), Reply :: term(), state()} |
-                         {stop, reason(), state()}.
-handle_call(Request, From, State) ->
-    handle_info({xlx, From, Request}, State).
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling cast messages.
-%% {stop, Reason} is special notification to stop or transfer the state.
-%%
-%% @end
-%%--------------------------------------------------------------------
--spec handle_cast(Msg :: term(), state()) ->
-                         {'noreply', state()} |
-                         {stop, reason(), state()}.
-handle_cast(Message, State) ->
-    handle_info({xlx, Message}, State).
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling all non call/cast messages
-%%
-%% @end
-%%--------------------------------------------------------------------
--spec handle_info(Info :: term(), state()) ->
-                         {'noreply', state()} |
-                         {'stop', reason(), state()}.
-handle_info(Info,  State) ->
-    case handle(Info, State) of
-        {noreply, #{hibernate := Timeout} = S} ->
-            {noreply, S, Timeout};
-        Result ->
-            Result
-    end.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% This function is called by a gen_server when it is about to
-%% terminate. It should be the opposite of Module:init/1 and do any
-%% necessary cleaning up. When it returns, the gen_server terminates
-%% with Reason. The return value is ignored.
-%% state action exit is called to destruct and to output result.
-%%  exit(state()) -> output().
-%% @end
-%%--------------------------------------------------------------------
--spec terminate(reason(), state()) -> no_return().
-terminate(Reason, State) ->
-    erlang:exit(leave(State, Reason)).
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Convert process state when code is changed
-%%
-%% @end
-%%--------------------------------------------------------------------
--spec code_change(OldVsn :: term(), state(), Extra :: term()) ->
-                         {'ok', state()}.
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
-
-%% Same as gen_server:reply().
--spec reply(from(), Reply :: term()) -> 'ok'.
-reply({To, Tag}, Reply) ->
-    catch To ! {Tag, Reply},
-    ok.
-
-%% Same as gen_server:call().
--spec call(process(), Request :: term()) -> Reply :: term().
-call(Process, Command) ->
-    call(Process, Command, ?DFL_TIMEOUT).
-
--spec call(process(), Request :: term(), timeout()) -> Reply :: term().
-call(Process, Command, Timeout) ->
-    Tag = make_ref(),
-    Process ! {xlx, {self(), Tag}, Command},
-    receive
-        {Tag, Result} ->
-            Result
-    after
-        Timeout ->
-            erlang:exit(timeout)
-    end.
-
-%% Same as gen_server:cast().
--spec cast(process(), Notify :: term()) -> 'ok'.
-cast(Process, Notification) ->
-    catch Process ! {xlx, Notification},
-    ok.
-
-%% stop is almost same effect as gen_server:stop().
--spec stop(process()) -> output().
-stop(Process) ->
-    stop(Process, normal, ?DFL_TIMEOUT).
-
--spec stop(process(), reason()) -> output().
-stop(Process, Reason) ->
-    stop(Process, Reason, ?DFL_TIMEOUT).
-
--spec stop(process(), reason(), timeout()) -> output().
-stop(Process, Reason, Timeout) ->
-    Mref = monitor(process, Process),
-    cast(Process, {stop, Reason}),
-    receive
-        {'DOWN', Mref, _, _, Result} ->
-            Result
-    after
-        Timeout ->
-            demonitor(Mref, [flush]),
-            erlang:exit(timeout)
-    end.
-
--spec detach(process()) -> {'detached', state()} | term().
-detach(Process) ->
-    stop(Process, xlx_detach, ?DFL_TIMEOUT).
--spec detach(process(), timeout()) -> {'detached', state()} | term().
-detach(Process, Timeout) ->
-    stop(Process, xlx_detach, Timeout).
-
-%%%===================================================================
-%%% Internal functions
-%%%===================================================================
 enter(#{entry := Entry} = State) ->
     case catch Entry(State) of
         {ok, S} ->
@@ -335,38 +188,41 @@ enter(#{entry := Entry} = State) ->
 enter(State) ->
     {ok, State}.
 
-leave(State, xlx_detach) ->  % detach command do not call exit action.
-    Sdetach = case ensure_stopped(State, xlx_detach) of
-            stopped ->
-                State;
-            killed ->
-                State#{output => abort};
-            {noreply, S} ->
-                S;
-            {stop, _, S} ->
-                S
-        end,
-    {detached, Sdetach};
-leave(State, Reason) ->
-    {Sign, Sexit} = try_exit(State#{reason => Reason}),
-    Sstop = case ensure_stopped(Sexit, Reason) of
-            stopped ->
-                Sexit;
-            killed ->
-                Sexit#{output => abort};
-            {noreply, S} ->
-                S;
-            {stop, _, S} ->
-                S
-        end,
-    FinalState = Sstop#{exit_time => erlang:system_time()},
-    case maps:find(status, FinalState) of
-        {ok, Status} when Status =/= running ->
-            {Sign, FinalState};
-        _ ->  % running or undefined
-            {Sign, FinalState#{status := stopped}}
+%%--------------------------------------------------------------------
+%% Handling messages by relay to react function.
+%%--------------------------------------------------------------------
+%% Handling sync call messages.
+-spec handle_call(term(), from(), state()) ->
+                         {'reply', Reply :: term(), state()} |
+                         {'noreply', state()} |
+                         {stop, reason(), Reply :: term(), state()} |
+                         {stop, reason(), state()}.
+handle_call(Request, From, State) ->
+    handle_info({xlx, From, Request}, State).
+
+%% Handling async cast messages.
+%% {stop, Reason} is special notification to stop or transfer the state.
+-spec handle_cast(Msg :: term(), state()) ->
+                         {'noreply', state()} |
+                         {stop, reason(), state()}.
+handle_cast(Message, State) ->
+    handle_info({xlx, Message}, State).
+
+%% Handling customized messages.
+-spec handle_info(Info :: term(), state()) ->
+                         {'noreply', state()} |
+                         {'stop', reason(), state()}.
+handle_info(Info,  State) ->
+    case handle(Info, State) of
+        {noreply, #{hibernate := Timeout} = S} ->
+            {noreply, S, Timeout};
+        Result ->
+            Result
     end.
 
+%%--------------------------------------------------------------------
+%% All three types message relay to one react handler.
+%%--------------------------------------------------------------------
 %% do activity can be asyn version of entry to initialize the state.
 %% If there is no do activity, actions in react can be dynamic version of do.
 %% '_xlx_do_activity' must be the first message handled by gen_server.
@@ -429,6 +285,10 @@ post_({xlx, hibernate}, {noreply, State}) ->
 post_(_Info, Result) ->
     Result.
 
+%%--------------------------------------------------------------------
+%% Time-consuming activity in two mode: sync or async.
+%% async mode is perfered.
+%%--------------------------------------------------------------------
 do_activity(#{do := Do} = State) ->
     case maps:get(work_mode, State, sync) of
         async ->
@@ -444,6 +304,7 @@ do_activity(#{do := Do} = State) ->
 do_activity(State) ->
     {ok, State}.
 
+%% Normalize output as gen_server spec.
 done({ok, #{} = Supplement}, State) ->
     {noreply, maps:merge(State, Supplement)};
 done({ok, Result}, State) ->
@@ -455,6 +316,50 @@ done({stop, Reason}, State) ->
     {stop, Reason, State};
 done(Exception, State) ->
     {stop, Exception, State#{status := exception}}.
+
+
+%%--------------------------------------------------------------------
+%% This function is called by a gen_server when it is about to
+%% terminate. It should be the opposite of Module:init/1 and do any
+%% necessary cleaning up. When it returns, the gen_server terminates
+%% with Reason. The return value is ignored.
+%% state action exit is called to destruct and to output result.
+%%--------------------------------------------------------------------
+-spec terminate(reason(), state()) -> no_return().
+terminate(Reason, State) ->
+    erlang:exit(leave(State, Reason)).
+
+leave(State, xlx_detach) ->  % detach command do not call exit action.
+    Sdetach = case ensure_stopped(State, xlx_detach) of
+            stopped ->
+                State;
+            killed ->
+                State#{output => abort};
+            {noreply, S} ->
+                S;
+            {stop, _, S} ->
+                S
+        end,
+    {detached, Sdetach};
+leave(State, Reason) ->
+    {Sign, Sexit} = try_exit(State#{reason => Reason}),
+    Sstop = case ensure_stopped(Sexit, Reason) of
+            stopped ->
+                Sexit;
+            killed ->
+                Sexit#{output => abort};
+            {noreply, S} ->
+                S;
+            {stop, _, S} ->
+                S
+        end,
+    FinalState = Sstop#{exit_time => erlang:system_time()},
+    case maps:find(status, FinalState) of
+        {ok, Status} when Status =/= running ->
+            {Sign, FinalState};
+        _ ->  % running or undefined
+            {Sign, FinalState#{status := stopped}}
+    end.
 
 ensure_stopped(#{worker := Worker} = State, Reason) ->
     case is_process_alive(Worker) of
@@ -473,6 +378,7 @@ ensure_stopped(#{worker := Worker} = State, Reason) ->
 ensure_stopped(_, _) ->
     stopped.
 
+%% Mind the priority of sign extracting.
 try_exit(#{exit := Exit} = State) ->
     try Exit(State) of
         Result ->
@@ -487,6 +393,76 @@ try_exit(#{sign := Sign} = State) ->
     {Sign, State};
 try_exit(State) ->
     {stopped, State}.
+
+%%--------------------------------------------------------------------
+%% Convert process state when code is changed
+%%--------------------------------------------------------------------
+-spec code_change(OldVsn :: term(), state(), Extra :: term()) ->
+                         {'ok', state()}.
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
+
+%%--------------------------------------------------------------------
+%% Helper functions for invocation by message wrapping.
+%%--------------------------------------------------------------------
+%% Same as gen_server:reply().
+-spec reply(from(), Reply :: term()) -> 'ok'.
+reply({To, Tag}, Reply) ->
+    catch To ! {Tag, Reply},
+    ok.
+
+%% Same as gen_server:call().
+-spec call(process(), Request :: term()) -> Reply :: term().
+call(Process, Command) ->
+    call(Process, Command, ?DFL_TIMEOUT).
+
+-spec call(process(), Request :: term(), timeout()) -> Reply :: term().
+call(Process, Command, Timeout) ->
+    Tag = make_ref(),
+    Process ! {xlx, {self(), Tag}, Command},
+    receive
+        {Tag, Result} ->
+            Result
+    after
+        Timeout ->
+            erlang:exit(timeout)
+    end.
+
+%% Same as gen_server:cast().
+-spec cast(process(), Notify :: term()) -> 'ok'.
+cast(Process, Notification) ->
+    catch Process ! {xlx, Notification},
+    ok.
+
+%% stop is almost same effect as gen_server:stop().
+-spec stop(process()) -> output().
+stop(Process) ->
+    stop(Process, normal, ?DFL_TIMEOUT).
+
+-spec stop(process(), reason()) -> output().
+stop(Process, Reason) ->
+    stop(Process, Reason, ?DFL_TIMEOUT).
+
+-spec stop(process(), reason(), timeout()) -> output().
+stop(Process, Reason, Timeout) ->
+    Mref = monitor(process, Process),
+    cast(Process, {stop, Reason}),
+    receive
+        {'DOWN', Mref, _, _, Result} ->
+            Result
+    after
+        Timeout ->
+            demonitor(Mref, [flush]),
+            erlang:exit(timeout)
+    end.
+
+%% Unload context data from engine.
+-spec detach(process()) -> {'detached', state()} | term().
+detach(Process) ->
+    stop(Process, xlx_detach, ?DFL_TIMEOUT).
+-spec detach(process(), timeout()) -> {'detached', state()} | term().
+detach(Process, Timeout) ->
+    stop(Process, xlx_detach, Timeout).
 
 %%%===================================================================
 %%% Unit test
