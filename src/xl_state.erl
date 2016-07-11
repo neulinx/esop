@@ -92,10 +92,7 @@
 %%%===================================================================
 
 %%--------------------------------------------------------------------
-%% @doc
-%% Starts the server
-%%
-%% @end
+%% Starts the server.
 %%--------------------------------------------------------------------
 -spec start_link(state()) -> start_ret().
 start_link(State) ->
@@ -103,11 +100,13 @@ start_link(State) ->
 
 -spec start_link(state(), [start_opt()]) -> start_ret().
 start_link(State, Options) ->
-    gen_server:start_link(?MODULE, State, Options).
+    Opts = merge_options(Options, State),
+    gen_server:start_link(?MODULE, State, Opts).
 
 -spec start_link(name(), state(), [start_opt()]) -> start_ret().
 start_link(Name, State, Options) ->
-    gen_server:start_link(Name, ?MODULE, State, Options).
+    Opts = merge_options(Options, State),
+    gen_server:start_link(Name, ?MODULE, State, Opts).
 
 -spec start(state()) -> start_ret().
 start(State) ->
@@ -115,19 +114,28 @@ start(State) ->
 
 -spec start(state(), [start_opt()]) -> start_ret().
 start(State, Options) ->
-    gen_server:start(?MODULE, State, Options).
+    Opts = merge_options(Options, State),
+    gen_server:start(?MODULE, State, Opts).
 
 -spec start(name(), state(), [start_opt()]) -> start_ret().
 start(Name, State, Options) ->
-    gen_server:start(Name, ?MODULE, State, Options).
+    Opts = merge_options(Options, State),
+    gen_server:start(Name, ?MODULE, State, Opts).
 
+merge_options(Options, #{timeout := Timeout}) ->
+    Options ++ [{timeout, Timeout}];  % Quick and dirty, but it works.
+merge_options(Options, _) ->
+    Options.
+
+%%--------------------------------------------------------------------
+%% Create state object from module and given parameters.
+%% If there is an exported function create/1 in the module, 
+%%  create new state object by it instead.
+%%--------------------------------------------------------------------
 -spec create(module()) -> state().
 create(Module) ->
     create(Module, #{}).
 
-%% Create state object from module and given parameters.
-%% If there is an exported function create/1 in the module, 
-%%  create new state object by it instead.
 -spec create(module(), map() | list()) -> state().
 create(Module, Data) when is_map(Data) ->
     case erlang:function_exported(Module, create, 1) of

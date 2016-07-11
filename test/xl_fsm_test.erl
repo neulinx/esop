@@ -57,6 +57,7 @@ create_fsm() ->
            react => fun s_react/2,
            entry => fun s1_entry/1},
     S2 = #{state_name => state2,
+           timeout => 1000,
            react => fun s_react/2,
            entry => fun s2_entry/1},
     S3 = #{state_name => state3,
