@@ -119,7 +119,7 @@ on_command(Command, #{status := running, state_pid := Pid} = Fsm) ->
 on_command(Command, #{status := failover} = Fsm) ->
     pending(Command, Fsm);
 on_command(_Command, Fsm) ->
-    {ok, unavailable, Fsm}.
+    {ok, {error, unhandled}, Fsm}.
 
 %% Queue the notification received in failover status.
 on_notify(Info, #{status := failover} = Fsm) ->
@@ -139,7 +139,7 @@ on_notify(Info, #{state_pid := Pid,
     Pid ! Info,
     {ok, Fsm};
 on_notify(_, Fsm) ->
-    {ok, Fsm}.
+    {ok, {error, unhandled}, Fsm}.
 
 on_message(xlx_retry, #{status := failover} = Fsm) ->
     retry(Fsm); 
@@ -157,7 +157,7 @@ on_message(Message, #{status := running,
     Pid ! Message,
     {ok, Fsm};
 on_message(_, Fsm) ->
-    {ok, Fsm}.
+    {ok, {error, unhandled}, Fsm}.
 
 %%--------------------------------------------------------------------
 %% Main part of FSM logic, state changing.

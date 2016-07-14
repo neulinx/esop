@@ -127,11 +127,10 @@ fsm_test_cases(Fsm) ->
     ?assert(2 =:= xl_state:call(Pid, "error_test")),
     catch xl_state:call(Pid, "error_test", 0),
     SelfHeal = xl_state:call(Pid, max_pending_size),
-    try xl_state:call(Pid, {get, state}, 20) of
+    case xl_state:call(Pid, {get, state}, 20) of
         state2 ->
-            ?assert(SelfHeal =:= 5)
-    catch
-        exit: timeout ->
+            ?assert(SelfHeal =:= 5);
+        {error, timeout} ->
             ?assert(SelfHeal =:= undefined)
     end,
     timer:sleep(10),

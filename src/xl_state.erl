@@ -39,7 +39,7 @@
               output/0]).
 
 -type name() :: {local, atom()} | {global, atom()} | {via, atom(), term()}.
--type from() :: {To :: pid(), Tag :: identifier()}.
+-type from() :: {To :: process(), Tag :: identifier()}.
 -type process() :: pid() | (LocalName :: atom()).
 -type start_ret() ::  {'ok', pid()} | 'ignore' | {'error', term()}.
 -type start_opt() ::
@@ -84,6 +84,9 @@
 -type exit() :: fun((state()) -> output()).
 -type react() :: fun((message() | term(), state()) -> ok() | fail()).
 -type do() :: fun((state()) -> ok() | fail() | no_return()).
+-type reply() :: {'ok', term()} | 'ok' |
+                 {'error', term()} | 'error' |
+                 term().
 %% work done output on async mode:
 %% {ok, map()} | {ok, Result::term()} | {stop, reason()}
 
@@ -193,9 +196,9 @@ enter(State) ->
 %%--------------------------------------------------------------------
 %% Handling sync call messages.
 -spec handle_call(term(), from(), state()) ->
-                         {'reply', Reply :: term(), state()} |
+                         {'reply', reply(), state()} |
                          {'noreply', state()} |
-                         {stop, reason(), Reply :: term(), state()} |
+                         {stop, reason(), reply(), state()} |
                          {stop, reason(), state()}.
 handle_call(Request, From, State) ->
     handle_info({xlx, From, Request}, State).
@@ -269,7 +272,7 @@ handle_(Info, #{react := React} = State) ->
 handle_({'EXIT', _, _} = Kill, State) ->
     {stop, Kill, State};
 handle_({xlx, From, _Request}, State) ->
-    reply(From, {error, no_handler}),  % Empty state, just be graceful.
+    reply(From, {error, unhandled}),  % Empty state, just be graceful.
     {noreply, State};
 handle_(_Info, State) ->
     {noreply, State}.
@@ -412,11 +415,11 @@ reply({To, Tag}, Reply) ->
     ok.
 
 %% Same as gen_server:call().
--spec call(process(), Request :: term()) -> Reply :: term().
+-spec call(process(), Request :: term()) -> reply().
 call(Process, Command) ->
     call(Process, Command, ?DFL_TIMEOUT).
 
--spec call(process(), Request :: term(), timeout()) -> Reply :: term().
+-spec call(process(), Request :: term(), timeout()) -> reply().
 call(Process, Command, Timeout) ->
     Tag = make_ref(),
     Process ! {xlx, {self(), Tag}, Command},
@@ -425,7 +428,7 @@ call(Process, Command, Timeout) ->
             Result
     after
         Timeout ->
-            erlang:exit(timeout)
+            {error, timeout}
     end.
 
 %% Same as gen_server:cast().

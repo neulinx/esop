@@ -7,7 +7,7 @@
     stdlib
    ]},
   {env,[]},
-  {modules, [xl_state, xl_fsm]},
+  {modules, [xl_state, xl_fsm, xl_actor]},
 
   {maintainers, []},
   {licenses, []},
