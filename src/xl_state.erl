@@ -371,7 +371,7 @@ ensure_stopped(#{worker := Worker} = State, Reason) ->
             try
                 done(stop(Worker, Reason, Timeout), State)
             catch
-                {exit, timeout} ->
+                _: _ ->
                     erlang:exit(Worker, kill),
                     killed
             end;

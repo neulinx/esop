@@ -32,7 +32,7 @@ work_async(S) ->
 
 work_sync(#{actor := Fsm, state_name := Name} = S) ->
     S0 = xl_state:call(Fsm, state),
-    ?assertMatch(#{state_name := Name}, S0),
+    ?assertMatch({ok, #{state_name := Name}}, S0),
     {ok, pi, S}.
 
 %% Set counter 2 as pitfall.
@@ -117,11 +117,11 @@ fsm_test_cases(Fsm) ->
     {ok, Pid} = xl_state:start_link(Fsm),
     %% Basic actions.
     ?assertMatch(state1, xl_state:call(Pid, {get, state})),
-    ?assertMatch(#{state_name := state1}, gen_server:call(Pid, state)),
+    ?assertMatch({ok, #{state_name := state1}}, gen_server:call(Pid, state)),
     Pid ! transfer,
     timer:sleep(10),
     ?assert(state2 =:= gen_server:call(Pid, {get, state})),
-    ?assert(2 =:=  gen_server:call(Pid, step)),
+    ?assert({ok, 2} =:=  gen_server:call(Pid, step)),
     %% Failover test.
     ?assert(1 =:= xl_state:call(Pid, "error_test")),
     ?assert(2 =:= xl_state:call(Pid, "error_test")),
@@ -129,9 +129,9 @@ fsm_test_cases(Fsm) ->
     SelfHeal = xl_state:call(Pid, max_pending_size),
     case xl_state:call(Pid, {get, state}, 20) of
         state2 ->
-            ?assert(SelfHeal =:= 5);
+            ?assert(SelfHeal =:= {ok, 5});
         {error, timeout} ->
-            ?assert(SelfHeal =:= undefined)
+            ?assert(SelfHeal =:= error)
     end,
     timer:sleep(10),
     %% Worker inside state test.
@@ -152,7 +152,7 @@ fsm_test_resume(Pid) ->
     gen_server:cast(Pid, {transfer, s5}),
     timer:sleep(10),
     ?assertMatch(state5, xl_state:call(Pid, {get, state})),
-    ?assert(running =:= xl_state:call(Pid, status)),
+    ?assert({ok, running} =:= xl_state:call(Pid, status)),
     gen_server:cast(Pid, {transfer, s3}),
     timer:sleep(10),
     ?assertMatch(state2, xl_state:call(Pid, {get, state})),

@@ -112,9 +112,9 @@ process(Message, Fsm) ->
 
 %% First layer, FSM attribute. Atomic type is reserved for internal.
 on_command({_, _, Key}, Fsm) when is_atom(Key) ->
-    {ok, maps:get(Key, Fsm, undefined), Fsm};
+    {ok, maps:find(Key, Fsm), Fsm};
 on_command(Command, #{status := running, state_pid := Pid} = Fsm) ->
-    Pid ! Command,  % relay message and noreplay for call.
+    Pid ! Command,  % relay message and noreply for call.
     {ok, Fsm};
 on_command(Command, #{status := failover} = Fsm) ->
     pending(Command, Fsm);
@@ -327,12 +327,13 @@ stop_1(#{state_pid := Pid} = Fsm, Reason) ->
     case is_process_alive(Pid) of
         true->
             Timeout = maps:get(timeout, Fsm, ?DFL_TIMEOUT),
-            case catch xl_state:stop(Pid, Reason, Timeout) of
-                {'EXIT', timeout} ->
-                    erlang:exit(Pid, kill),  % Mention case of trap exit.
-                    {timeout, Fsm#{status := exception}};
+            try xl_state:stop(Pid, Reason, Timeout) of
                 {Sign, FinalState} ->
                     {Sign, Fsm#{state => FinalState, sign => Sign}}
+            catch
+                _: Error ->  % should be exit: timeout
+                    erlang:exit(Pid, kill),  % Mention case of trap exit.
+                    {Error, Fsm#{status := exception}}
             end;
         false ->
             {stopped, Fsm}
