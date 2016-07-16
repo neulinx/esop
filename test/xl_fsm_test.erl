@@ -30,9 +30,9 @@ work_async(S) ->
             work_async(S)
     end.
 
-work_sync(#{actor := Fsm, state_name := Name} = S) ->
+work_sync(#{actor := Fsm, name := Name} = S) ->
     S0 = xl_state:call(Fsm, state),
-    ?assertMatch({ok, #{state_name := Name}}, S0),
+    ?assertMatch({ok, #{name := Name}}, S0),
     {ok, pi, S}.
 
 %% Set counter 2 as pitfall.
@@ -48,28 +48,28 @@ s_react({xlx, {transfer, Next}}, S) ->
     {stop, transfer, S#{sign => Next}};
 %% state
 s_react({xlx, _, {get, state}}, S) ->
-    {ok, maps:get(state_name, S), S};
+    {ok, maps:get(name, S), S};
 s_react(_, S) ->  % drop unknown message.
     {ok, S}.
 
 create_fsm() ->
-    S1 = #{state_name => state1,
+    S1 = #{name => state1,
            react => fun s_react/2,
            entry => fun s1_entry/1},
-    S2 = #{state_name => state2,
+    S2 = #{name => state2,
            timeout => 1000,
            react => fun s_react/2,
            entry => fun s2_entry/1},
-    S3 = #{state_name => state3,
+    S3 = #{name => state3,
            do => fun work_instantly/1,
            react => fun s_react/2,
            entry => fun s1_entry/1},
-    S4 = #{state_name => state4,
+    S4 = #{name => state4,
            work_mode => async,
            do => fun work_async/1,
            react => fun s_react/2,
            entry => fun s2_entry/1},
-    S5 = #{state_name => state5,
+    S5 = #{name => state5,
            do => fun work_sync/1,
            react => fun s_react/2,
            entry => fun s2_entry/1},
@@ -117,7 +117,7 @@ fsm_test_cases(Fsm) ->
     {ok, Pid} = xl_state:start_link(Fsm),
     %% Basic actions.
     ?assertMatch(state1, xl_state:call(Pid, {get, state})),
-    ?assertMatch({ok, #{state_name := state1}}, gen_server:call(Pid, state)),
+    ?assertMatch({ok, #{name := state1}}, gen_server:call(Pid, state)),
     Pid ! transfer,
     timer:sleep(10),
     ?assert(state2 =:= gen_server:call(Pid, {get, state})),

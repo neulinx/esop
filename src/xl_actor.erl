@@ -10,7 +10,7 @@
 
 -compile({no_auto_import,[exit/1]}).
 %% API
--export([entry/1, do/1, exit/1, react/2]).
+-export([entry/1, exit/1, react/2]).
 
 -ifdef(TEST).
     -include_lib("eunit/include/eunit.hrl").
@@ -51,23 +51,18 @@
 %%-type from() :: {path() | process(), Tag :: identifier()}.
 
 %%--------------------------------------------------------------------
-%% Behaviors of state.
-%%
-%% There are two type of actor boundary: opened or closed. Currently
-%% support closed boundary only. It is easy for opened boundary implemented.
-%%--------------------------------------------------------------------
+%% Initialize the actor.
 %% Main task of entry is ensure dependent actors preloaded.
 %% Perform preload in entry action for fail-fast (synchronous return).
+%%--------------------------------------------------------------------
 -spec entry(actor()) -> {'ok', actor()}.
 entry(Actor) ->
     process_flag(trap_exit, true),
     preload(Actor).
 
-%% Do nothing.
--spec do(actor()) -> result().
-do(Actor) ->
-    {ok, Actor}.
-
+%%--------------------------------------------------------------------
+%% Uninitialize, stop all local actors.
+%%--------------------------------------------------------------------
 %% Stop local links before exit.
 -spec exit(actor()) -> {'stopped', actor()}.
 exit(#{links := L, monitors := M} = Actor) ->
@@ -76,87 +71,56 @@ exit(#{links := L, monitors := M} = Actor) ->
 exit(Actor) ->
     {stopped, Actor}.
 
+%%--------------------------------------------------------------------
+%% Message process
+%%--------------------------------------------------------------------
 -spec react(Message :: term(), actor()) -> result().
-react(Message, Actor) ->
-    on_message(Message, Actor).
-
-%%--------------------------------------------------------------------
-%% Message handlers
-%%--------------------------------------------------------------------
 %% Local link, try to hotfix on error.
-on_message({'EXIT', Pid, Output}, Actor) ->
+react({'EXIT', Pid, Output}, Actor) ->
     A = checkout(Pid, Output, Actor),
     {ok, A};
 %% For global link, update link with no more action.
 %% todo: archive output according by link.
-on_message({'DOWN', Monitor, process, _, _Output}, Actor) ->
+react({'DOWN', Monitor, process, _, _Output}, Actor) ->
     {A, _, _} = deactive(Monitor, Actor),
     {ok, A};
 %% Messages with path, relay message to next hop.
 %% Notice: it is a backdoor if PID in path, so remove it.
-on_message({xlx, From, [Next | Path], Message}, Actor) ->
+react({xlx, From, [Next | Path], Message}, Actor) ->
     %% relay to next hop
-    case ensure_load(Next, Actor) of
+    case ensure_link(Next, Actor, true) of
         {ok, Pid, A} ->
             Pid ! {xlx, From, Path, Message},
             {ok, A};
         _Error ->
             {ok, unreachable, Actor}
     end;
-on_message({xlx, From, [], Message}, Actor) ->
-    on_message({xlx, From, Message}, Actor);
-on_message({xlx, _From, Command}, Actor) ->
-    invoke(Command, Actor);
-on_message(_Message, Actor) ->
-    {ok, {error, unhandled}, Actor}.
-
-invoke({Tag, _} = Command, #{realm := R} = Actor)
-  when Tag =:= get_active_actor orelse
-       Tag =:= register orelse
-       Tag =:= register_load ->
-    Timeout = maps:get(timeout, Actor, ?DFL_TIMEOUT),
-    Result = xl_state:call(R, Command, Timeout),
-    {ok, Result, Actor};
-invoke({get_active_actor, Id}, Actor) ->
-    case ensure_load(Id, Actor) of
-        {ok, Pid, A} ->
-            {ok, {ok, Pid}, A};
+react({xlx, From, [], Message}, Actor) ->
+    react({xlx, From, Message}, Actor);
+react({xlx, _From, Command}, Actor) ->
+    try invoke(Command, Actor) of
+        {ok, Result, A} ->
+            {ok, {ok, Result}, A};
         Error ->
             {ok, Error, Actor}
+    catch
+        _: Error ->
+            {ok, {error, Error}, Actor}
     end;
-invoke({register, State}, #{boundary := opened} = Actor) ->
-    register_actor(State, Actor);
-invoke({register_load, State},  #{boundary := opened} = Actor) ->
-    register_and_load(State, Actor);
+react(_Message, Actor) ->
+    {ok, {error, unhandled}, Actor}.
+
+invoke({get_active_link, Id}, Actor) ->
+    ensure_link(Id, Actor, true);
+invoke({link, Link}, Actor) ->
+    ensure_link(Link, Actor, false);
+invoke({link, Link, Load}, Actor) ->
+    ensure_link(Link, Actor, Load);
+invoke({unlink, Name}, Actor) ->
+    unlink(Name, Actor);
 %% default behavior is data access
 invoke(Key, Actor) ->
     {ok, maps:find(Key, Actor), Actor}.
-
-%%--------------------------------------------------------------------
-%% register, globally or locally.
-%%--------------------------------------------------------------------
-register_actor(#{gid := Gid} = State, #{links := L} = Actor) ->
-    case maps:is_key(Gid, L) of
-        true ->
-            {ok, {error, already_existed}, Actor};
-        false ->
-            L1 = L#{Gid => State},
-            {ok, {ok, Gid}, Actor#{links := L1}}
-    end;
-register_actor(_, Actor) ->
-    {ok, {error, invalid_data}, Actor}.
-
-register_and_load(#{gid := Gid} = State, #{links := L} = Actor) ->
-    case maps:is_key(Gid, L) of
-        true ->
-            {ok, {error, already_existed}, Actor};
-        false ->
-            {ok, Pid, A} = ensure_load(Gid, State, Actor),
-            {ok, {ok, Pid}, A}
-    end;
-register_and_load(_, Actor) ->
-    {ok, {error, invalid_data}, Actor}.
-
 
 %%--------------------------------------------------------------------
 %% Failover
@@ -172,12 +136,13 @@ checkout(Pid, {exception, Exception}, Actor) ->
 checkout(Pid, _Exception, Actor) ->
     hotfix(undefined, Pid, Actor).
 
-hotfix(ErrState, Pid, Actor) ->
+hotfix(ErrState, Pid, #{links := L, monitors :=M} = Actor) ->
     {A, Name, InitState} = deactive(Pid, Actor),
     Failover = maps:get(failover, A, restore),
     NewState = heal(Failover, InitState, ErrState),
-    {ok, _, A1} = ensure_load(Name, NewState, A),
-    A1.
+    {ok, Pid} = xl_state:start_link(NewState),
+    L1 = L#{Name := {InitState, Pid}},
+    A#{links := L1, monitors := M#{Pid => Name}}.
 
 heal(restore, InitState, undefined) ->
     InitState;
@@ -199,7 +164,7 @@ preload(Actor) ->
     {ok, Actor}.
 
 preload([Dep | Rest], Actor) ->
-    {ok, _, A} = ensure_load(Dep, Actor),
+    {ok, _, A} = ensure_link(Dep, Actor, true),  % link & load
     preload(Rest, A);
 preload([], Actor) ->
     {ok, Actor};
@@ -207,52 +172,74 @@ preload([], Actor) ->
 preload(Preload, Actor) when is_function(Preload) ->
     Preload(Actor).
 
-%% Early phase of load, get state by name and check if loaded.
-ensure_load(Name, #{links := L} = Actor) ->
+ensure_link({Name, State}, Actor, Load) ->
+    ensure_link(Name, State, Actor, Load);
+ensure_link(#{gid := Gid} = State, Actor, Load) ->
+    ensure_link(Gid, State, Actor, Load);
+ensure_link(#{name := Name} = State, Actor, Load) ->
+    ensure_link(Name, State, Actor, Load);
+ensure_link(Id, Actor, Load) ->
+    ensure_link(Id, Id, Actor, Load).
+
+ensure_link(_Name, Link, #{boundary := B}, _Load)
+  when B =/= opened andalso is_map(Link) ->
+    %% boudary is closed, link cannot be changed.
+    {error, forbidden};
+ensure_link(Name, Link, #{links := L} = Actor, Load) ->
     case maps:find(Name, L) of
-        {ok, {_S, Pid}} ->  % Tuple type means loaded.
+        error ->
+            link_(Name, Link, Actor, Load);  % not registered
+        {ok, {Link, Pid}} ->  % local active link
             {ok, Pid, Actor};
-        {ok, State} ->
-            ensure_load(Name, State, Actor);
-        _NotFound ->
-            {error, undefined}
+        {ok, {Link, Pid, _}} ->  % global active link
+            {ok, Pid, Actor};
+        {ok, Link} when Load ->  % registered but inactive link
+            link_(Name, Link, Actor, Load);
+        {ok, Link} ->  % already registered, but same data. It is ok.
+            {ok, Name, Actor};
+        {ok, State} when Load ->  % local inactive link
+            link_(Name, State, Actor, Load);
+        {ok, _Existed} ->  % Link is different, is conflict.
+            {error, existed}
     end.
 
 %% If gid is presented, it is global actor, fetch from realm keeper.
 %% Or current actor acts as realm keeper if no present realm.
-ensure_load(Name, #{gid := _} = State, #{realm := Realm} = Actor) ->
-    global_invoke(register_load, Name, State, Realm, Actor);
-%% Local actor, also act as registrar if no realm keeper.
-ensure_load(Name, State, Actor) when is_map(State) ->
+link_(Name, #{gid := Gid} = State, #{realm := R} = Actor, Load) ->
+    g_link(Name, Gid, R, {link, {Gid, State}, Load}, Actor);
+link_(Name, #{} = State, #{links := L} = Actor, true) ->
     {ok, Member} = xl_state:start_link(State),
-    A = activate(Name, {State, Member}, Member, Actor),
-    {ok, Member, A};
-ensure_load(Name, Id, #{realm := Realm} = Actor) ->
-    global_invoke(get_active_actor, Name, Id, Realm, Actor).
-
-global_invoke(Command, Name, IdOrData, Realm, Actor) ->
-    %% For pattern matching, Neighbor should be pid type.
-    Neighbor = case xl_state:call(Realm, {Command, IdOrData}) of
-                   {ok, Pid} when is_pid(Pid) ->
-                       Pid;
-                   {ok, PName} when is_atom(PName) ->
-                       whereis(PName)
-               end,
-    Monitor = monitor(process, Neighbor),
-    %% Update link
-    A = activate(Name, {IdOrData, Neighbor, Monitor}, Monitor, Actor),
-    {ok, Neighbor, A}.
-
-
-%% todo: check for closed realm, which will not add new link.
-%% todo: support function type links.
-activate(Name, Link, Monitor, #{links := L} = Actor) ->
+    L1 = L#{Name => {State, Member}},
     M = maps:get(monitors, Actor, #{}),
-    Actor#{links := L#{Name := Link},
-           monitors => M#{Monitor => Name}}.
+    M1 = M#{Member => Name},
+    A = Actor#{links := L1, monitors => M1},
+    {ok, Member, A};
+link_(Name, #{} = State, #{links := L} = Actor, false) ->
+    A = Actor#{links := L#{Name => State}},
+    {ok, Name, A};
+link_(Name, Gid, #{realm := R} = Actor, Load) ->
+    g_link(Name, Gid, R, {get_link, Gid, Load}, Actor);
+link_(_N, _S, _A, _L) ->
+    {error, invalid}.
+
+g_link(Name, Gid, Realm, Command, #{links := L} = Actor) ->
+    Timeout = maps:get(timeout, Actor, ?DFL_TIMEOUT),
+    case xl_state:call(Realm, Command, Timeout) of
+        {ok, Gid} ->  % not active
+            A = Actor#{links := L#{Name => Gid}},
+            {ok, Gid, A};
+        {ok, Pid} ->
+            Mid = monitor(process, Pid),
+            M = maps:get(monitors, Actor, #{}),
+            A = Actor#{links := L#{Name => {Gid, Pid, Mid}},
+                       monitors := M#{Mid => Name}},
+            {ok, Pid, A};
+        _Error ->
+            {error, fail_to_link}
+    end.
 
 %%--------------------------------------------------------------------
-%% Stop actor and deactivate local links.
+%% Stop, deactivate and unlink.
 %%--------------------------------------------------------------------
 %% When 'EXIT' or 'DOWN' tag message received, demonitor is not necessary.
 deactive(Monitor, #{monitors := M} = Actor) ->
@@ -283,6 +270,25 @@ deactive(Pid) when is_pid(Pid) ->
 deactive(Monitor) ->
     demonitor(Monitor).
 
+unlink(Name, #{boundary := opened, links := L} = Actor) ->
+    M = maps:get(monitors, Actor, #{}),
+    case maps:find(Name, L) of
+        {ok, {_S, Pid}} ->  % local link
+            deactive(Pid),
+            L1 = maps:remove(Name, L),
+            M1 = mpas:remove(Pid, M),
+            {ok, unlinked, Actor#{links := L1, monitors := M1}};
+        {ok, {_S, _Pid, Monitor}} ->  % global link.
+            deactive(Monitor),
+            L1 = maps:remove(Name, L),
+            M1 = mpas:remove(Monitor, M),
+            {ok, unlinked, Actor#{links := L1, monitors := M1}};
+        error ->
+            {error, not_found}
+    end;
+unlink(_Name, _Actor) ->
+    {error, forbidden}.
+            
 %%%===================================================================
 %%% Unit test
 %%%===================================================================

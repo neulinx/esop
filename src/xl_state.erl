@@ -55,6 +55,7 @@
              'work_mode' => work_mode(),  % default: sync
              'worker' => pid(),
              'pid' => pid(),  % mandatory
+             'actor' => process(),  % environment of state.
              'timeout' => timeout(),  % default: 5000
              'hibernate' => timeout(),  % mandatory, default: infinity
              'reason' => reason(),
@@ -83,7 +84,7 @@
 -type entry() :: fun((state()) -> ok() | fail()).
 -type exit() :: fun((state()) -> output()).
 -type react() :: fun((message() | term(), state()) -> ok() | fail()).
--type do() :: fun((state()) -> ok() | fail() | no_return()).
+-type do() :: fun(). %(state()) -> ok() | fail() | no_return()).
 -type reply() :: {'ok', term()} | 'ok' |
                  {'error', term()} | 'error' |
                  term().
@@ -292,7 +293,7 @@ post_(_Info, Result) ->
 %% Time-consuming activity in two mode: sync or async.
 %% async mode is perfered.
 %%--------------------------------------------------------------------
-do_activity(#{do := Do} = State) ->
+do_activity(#{do := Do} = State) when is_function(Do) ->
     case maps:get(work_mode, State, sync) of
         async ->
             erlang:process_flag(trap_exit, true),  % Potentially block exit.

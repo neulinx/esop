@@ -29,8 +29,7 @@
 -type sign() :: term().  % must not be tuple type.
 -type vector() :: {name(), sign()} | (FromRoot :: sign()).
 -type limit() :: pos_integer() | 'infinity'.
--type state() :: #{'state_name' => term(),  % mandatory
-                   'actor' => pid() | atom()} % mandatory
+-type state() :: #{'name' := term()}  % mandatory
                | xl_state:state().
 -type states() :: states_table() | states_fun().
 -type states_table() :: #{From :: vector() => To :: state()}.
@@ -43,7 +42,7 @@
                     {'restore', rollback(), Mend :: map()} |
                     {'reset', rollback(), Mend :: map()}.
 -type fsm() :: #{'state' => state(),
-                 'states' => states(),
+                 'states' := states(),
                  'state_pid' => pid(),
                  'actor' => pid() | atom(),
                  'step' => non_neg_integer(),
@@ -89,7 +88,7 @@ exit(Fsm) ->
 next(#{state := State}, start) ->
     State;
 next(#{state := State, states := States}, Sign) ->
-    Name = maps:get(state_name, State),
+    Name = maps:get(name, State),
     locate(States, {Name, Sign});
 next(#{states := States}, Sign) ->
     locate(States, Sign).
@@ -264,7 +263,7 @@ failover(#{states := States} = Fsm, Reroute, _Mode) ->  % Reroute.
     Fsm#{state => State}.
     
 reset_state(#{state := State, states := States} = Fsm) ->
-    Name = maps:get(state_name, State),
+    Name = maps:get(name, State),
     NewState = locate(States, Name),
     Fsm#{state := NewState}.
 
