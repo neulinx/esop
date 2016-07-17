@@ -11,6 +11,7 @@
 -compile({no_auto_import,[exit/1]}).
 %% API
 -export([entry/1, exit/1, react/2]).
+-export([call/3, call/4]).
 
 -ifdef(TEST).
     -include_lib("eunit/include/eunit.hrl").
@@ -47,7 +48,8 @@
                     {'restore', Mend :: map()} |
                     {'reset', Mend :: map()}.
 -type result() :: xl_state:ok() | xl_state:fail().
-%%-type path() :: [process()].
+-type reply() :: xl_state:reply().
+-type path() :: [process()].
 %%-type from() :: {path() | process(), Tag :: identifier()}.
 
 %%--------------------------------------------------------------------
@@ -97,30 +99,72 @@ react({xlx, From, [Next | Path], Message}, Actor) ->
     end;
 react({xlx, From, [], Message}, Actor) ->
     react({xlx, From, Message}, Actor);
-react({xlx, _From, Command}, Actor) ->
-    try invoke(Command, Actor) of
-        {ok, Result, A} ->
-            {ok, {ok, Result}, A};
-        Error ->
-            {ok, Error, Actor}
-    catch
-        _: Error ->
-            {ok, {error, Error}, Actor}
-    end;
+react({xlx, From, Command}, Actor) ->
+    {Res, A} = try invoke(Command, Actor) of
+                   {ok, Result, A0} ->
+                       {{ok, Result}, A0};
+                   Error ->
+                       {Error, Actor}
+               catch
+                   _: Error ->
+                       {{error, Error}, Actor}
+               end,
+    xl_state:reply(From, Res),
+    {ok, A};
 react(_Message, Actor) ->
     {ok, {error, unhandled}, Actor}.
 
-invoke({get_active_link, Id}, Actor) ->
+invoke({get_link, Id}, Actor) ->
     ensure_link(Id, Actor, true);
 invoke({link, Link}, Actor) ->
     ensure_link(Link, Actor, false);
 invoke({link, Link, Load}, Actor) ->
     ensure_link(Link, Actor, Load);
+invoke({register, Link, Load}, Actor) ->
+    ensure_link(Link, Actor, Load);
+invoke({deregister, Name} = Command, #{realm := R} = Actor) ->
+    Timeout = maps:get(timeout, Actor, ?DFL_TIMEOUT),
+    Result = case xl_state:call(R, Command, Timeout) of
+                 {ok, Res} ->
+                     Res;
+                 Error ->
+                     Error
+             end,
+    case unlink(Name, Actor) of
+        {ok, unlinked, A} ->
+            {ok, Result, A};
+        _Error ->
+            {ok, Result, Actor}
+    end;
+invoke({deregister, Name}, Actor) ->
+    unlink(Name, Actor);
 invoke({unlink, Name}, Actor) ->
     unlink(Name, Actor);
 %% default behavior is data access
 invoke(Key, Actor) ->
-    {ok, maps:find(Key, Actor), Actor}.
+    case maps:find(Key, Actor) of
+        {ok, Value} ->
+            {ok, Value, Actor};
+        error ->
+            {error, unhandled}  % not found, may chain other handler.
+    end.
+
+%% Same as gen_server:call().
+-spec call(process(), path(), Request :: term()) -> reply().
+call(Process, Path, Command) ->
+    call(Process, Path, Command, ?DFL_TIMEOUT).
+
+-spec call(process(), path(), Request :: term(), timeout()) -> reply().
+call(Process, Path, Command, Timeout) ->
+    Tag = make_ref(),
+    Process ! {xlx, {self(), Tag}, Path, Command},
+    receive
+        {Tag, Result} ->
+            Result
+    after
+        Timeout ->
+            {error, timeout}
+    end.
 
 %%--------------------------------------------------------------------
 %% Failover
@@ -140,7 +184,7 @@ hotfix(ErrState, Pid, #{links := L, monitors :=M} = Actor) ->
     {A, Name, InitState} = deactive(Pid, Actor),
     Failover = maps:get(failover, A, restore),
     NewState = heal(Failover, InitState, ErrState),
-    {ok, Pid} = xl_state:start_link(NewState),
+    {ok, Pid} = spawn_actor(NewState, A),
     L1 = L#{Name := {InitState, Pid}},
     A#{links := L1, monitors := M#{Pid => Name}}.
 
@@ -197,18 +241,24 @@ ensure_link(Name, Link, #{links := L} = Actor, Load) ->
             link_(Name, Link, Actor, Load);
         {ok, Link} ->  % already registered, but same data. It is ok.
             {ok, Name, Actor};
+        {ok, {_Gid, Pid, _}} ->  % local name link global actor;
+            {ok, Pid, Actor};
+        {ok, {_State, Pid}} ->  % local name link local actor;
+            {ok, Pid, Actor};
         {ok, State} when Load ->  % local inactive link
             link_(Name, State, Actor, Load);
         {ok, _Existed} ->  % Link is different, is conflict.
             {error, existed}
-    end.
+    end;
+ensure_link(Name, Link, Actor, Load) ->
+    link_(Name, Link, Actor#{links => #{}}, Load).  % no register entry
 
 %% If gid is presented, it is global actor, fetch from realm keeper.
 %% Or current actor acts as realm keeper if no present realm.
 link_(Name, #{gid := Gid} = State, #{realm := R} = Actor, Load) ->
     g_link(Name, Gid, R, {link, {Gid, State}, Load}, Actor);
 link_(Name, #{} = State, #{links := L} = Actor, true) ->
-    {ok, Member} = xl_state:start_link(State),
+    {ok, Member} = spawn_actor(State, Actor),
     L1 = L#{Name => {State, Member}},
     M = maps:get(monitors, Actor, #{}),
     M1 = M#{Member => Name},
@@ -218,7 +268,7 @@ link_(Name, #{} = State, #{links := L} = Actor, false) ->
     A = Actor#{links := L#{Name => State}},
     {ok, Name, A};
 link_(Name, Gid, #{realm := R} = Actor, Load) ->
-    g_link(Name, Gid, R, {get_link, Gid, Load}, Actor);
+    g_link(Name, Gid, R, {link, Gid, Load}, Actor);
 link_(_N, _S, _A, _L) ->
     {error, invalid}.
 
@@ -232,11 +282,15 @@ g_link(Name, Gid, Realm, Command, #{links := L} = Actor) ->
             Mid = monitor(process, Pid),
             M = maps:get(monitors, Actor, #{}),
             A = Actor#{links := L#{Name => {Gid, Pid, Mid}},
-                       monitors := M#{Mid => Name}},
+                       monitors => M#{Mid => Name}},
             {ok, Pid, A};
         _Error ->
             {error, fail_to_link}
     end.
+
+spawn_actor(State, Actor) ->
+    Realm = maps:get(realm, Actor, self()),
+    xl_state:start_link(State#{realm => Realm}).
 
 %%--------------------------------------------------------------------
 %% Stop, deactivate and unlink.
@@ -292,7 +346,29 @@ unlink(_Name, _Actor) ->
 %%%===================================================================
 %%% Unit test
 %%%===================================================================
-
 -ifdef(TEST).
+new_actor(Data) ->
+    xl_state:create(xl_actor, Data).
+%% root, a->b, a->c, b->c, b->x, b->y.
+g1_test() ->
+    error_logger:tty(false),
+    Root = new_actor(#{gid => 0, name => root, boundary => opened}),
+    {ok, Ra} = xl_state:start(Root),
+    X = new_actor(#{name => x}),
+    C = new_actor(#{gid => 3, name => c}),
+    Bl = #{c => C, x => X, y => X#{name := y}},
+    B = new_actor(#{gid => 2, name => b, links => Bl}),
+    Al = #{b => B, c => C},
+    A = new_actor(#{gid => 1, name => a, links => Al}),
+    {ok, Aa} = xl_state:call(Ra, {register, A, true}),
+    ?assertMatch({ok, a}, xl_state:call(Aa, name)),
+    ?assertMatch({ok, c}, call(Aa, [c], name)),
+    ?assertMatch({ok, c}, call(Aa, [b, c], name)),
+    ?assertMatch({ok, x}, call(Aa, [b, x], name)),
+    ?debugVal(xl_state:call(Ra, links)),
+    ?debugVal(xl_state:call(Aa, links)),
 
+    xl_state:stop(Aa),
+    xl_state:stop(Ra).
+    
 -endif.

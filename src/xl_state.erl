@@ -34,6 +34,7 @@
               message/0,
               process/0,
               state/0,
+              reply/0,
               ok/0,
               fail/0,
               output/0]).
@@ -167,8 +168,7 @@ init(#{status := running} = State) ->  % Nothing to do for suspended state.
     {ok, State#{pid => self()}};
 init(State) ->
     EntryTime = erlang:system_time(),
-    Hib = maps:get(hibernate, State, ?DFL_TIMEOUT),
-    State1 = State#{entry_time => EntryTime, pid =>self(), hibernate => Hib},
+    State1 = State#{entry_time => EntryTime, pid =>self()},
     case enter(State1) of
         {ok, S} ->
             self() ! '_xlx_do_activity',  % Trigger off activity.
