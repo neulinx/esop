@@ -56,6 +56,7 @@
              'work_mode' => work_mode(),  % default: sync
              'worker' => pid(),
              'pid' => pid(),  % mandatory
+             'parent' => process(),  % Who spawn the state process.
              'actor' => process(),  % environment of state.
              'timeout' => timeout(),  % default: 5000
              'hibernate' => timeout(),  % mandatory, default: infinity

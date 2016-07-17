@@ -27,7 +27,7 @@
         #{'gid' => id(),  % Should be globally unique ID, for migration
           'name' => name(),
           'pid' => pid(),  % Actor ID, same as OTP process pid.
-          'realm' => process(), % Actor of the domain keeper.
+          'parent' => process(), % Actor of the domain keeper.
           'links' => links(),  % states graph, loaded and unloaded.
           'monitors' => monitors(), % Local or global monitor.
           'boundary' => 'opened' | 'closed',
@@ -122,7 +122,7 @@ invoke({link, Link, Load}, Actor) ->
     ensure_link(Link, Actor, Load);
 invoke({register, Link, Load}, Actor) ->
     ensure_link(Link, Actor, Load);
-invoke({deregister, Name} = Command, #{realm := R} = Actor) ->
+invoke({deregister, Name} = Command, #{parent := R} = Actor) ->
     Timeout = maps:get(timeout, Actor, ?DFL_TIMEOUT),
     Result = case xl_state:call(R, Command, Timeout) of
                  {ok, Res} ->
@@ -255,7 +255,7 @@ ensure_link(Name, Link, Actor, Load) ->
 
 %% If gid is presented, it is global actor, fetch from realm keeper.
 %% Or current actor acts as realm keeper if no present realm.
-link_(Name, #{gid := Gid} = State, #{realm := R} = Actor, Load) ->
+link_(Name, #{gid := Gid} = State, #{parent := R} = Actor, Load) ->
     g_link(Name, Gid, R, {link, {Gid, State}, Load}, Actor);
 link_(Name, #{} = State, #{links := L} = Actor, true) ->
     {ok, Member} = spawn_actor(State, Actor),
@@ -267,7 +267,7 @@ link_(Name, #{} = State, #{links := L} = Actor, true) ->
 link_(Name, #{} = State, #{links := L} = Actor, false) ->
     A = Actor#{links := L#{Name => State}},
     {ok, Name, A};
-link_(Name, Gid, #{realm := R} = Actor, Load) ->
+link_(Name, Gid, #{parent := R} = Actor, Load) ->
     g_link(Name, Gid, R, {link, Gid, Load}, Actor);
 link_(_N, _S, _A, _L) ->
     {error, invalid}.
@@ -289,8 +289,8 @@ g_link(Name, Gid, Realm, Command, #{links := L} = Actor) ->
     end.
 
 spawn_actor(State, Actor) ->
-    Realm = maps:get(realm, Actor, self()),
-    xl_state:start_link(State#{realm => Realm}).
+    Realm = maps:get(parent, Actor, self()),
+    xl_state:start_link(State#{parent => Realm}).
 
 %%--------------------------------------------------------------------
 %% Stop, deactivate and unlink.
