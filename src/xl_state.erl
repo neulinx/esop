@@ -154,7 +154,7 @@ create(Module, Data) when is_map(Data) ->
                          end
                      end,
             Actions = lists:foldl(Filter, #{}, Actions0),
-            maps:merge(Data, Actions)
+            maps:merge(Actions, Data)
     end;
 %% Convert data type from proplists to maps as type state().
 create(Module, Data) when is_list(Data) ->
