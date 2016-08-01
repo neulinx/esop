@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @author Gary Hai <gary@XL59.com>
-%%% @copyright (C) 2016, Neulinx Collaborations Ltd.
+%%% @copyright (C) 2016, Neulinx Platforms.
 %%% @doc
 %%%  Finite State Machine as a normal state object.
 %%% @end
@@ -29,8 +29,11 @@
 -type sign() :: term().  % must not be tuple type.
 -type vector() :: {name(), sign()} | (FromRoot :: sign()).
 -type limit() :: pos_integer() | 'infinity'.
--type state() :: #{'name' := term()}  % mandatory
-               | xl_state:state().
+-type process() :: pid() | atom().
+-type state() :: #{'name' := term(),
+                   'actor' := process(),
+                   'fsm' := process(),
+                   'engine' => engine()} | xl_state:state().
 -type states() :: states_table() | states_fun().
 -type states_table() :: #{From :: vector() => To :: state()}.
 -type states_fun() :: fun((From :: name(), sign()) -> To :: state()).
@@ -44,7 +47,8 @@
 -type fsm() :: #{'state' => state(),
                  'states' := states(),
                  'state_pid' => pid(),
-                 'actor' => pid() | atom(),
+                 'state_mode' => engine(),
+                 'actor' => process(),
                  'step' => non_neg_integer(),
                  'max_steps' => limit(),
                  'recovery' => recovery(),
@@ -56,28 +60,43 @@
                  'max_traces' => limit(),
                  'traces' => [state()] | fun((state()) -> any())
                 } | xl_state:state().
--type do_ret() :: xl_state:ok() | xl_state:fail().
--type exit_ret() :: xl_state:output().
--type react_ret() :: xl_state:ok() | xl_state:fail().
+-type engine() :: 'reuse' | 'standalone'.
 
 %%--------------------------------------------------------------------
 %% @doc
 %% Actions of state.
 %% @end
 %%--------------------------------------------------------------------
--spec do(fsm()) -> do_ret().
+-spec do(fsm()) -> xl_state:result().
 do(Fsm) ->
     erlang:process_flag(trap_exit, true),
     transfer(Fsm, start).
 
--spec react(Message :: term(), fsm()) -> react_ret().
+-spec react(Message :: term(), fsm()) -> xl_state:result().
 react(Message, Fsm) ->
-    process(Message, Fsm).
+    try process(Message, Fsm) of
+        Output ->
+            Output
+    catch
+        C: E ->
+            %% skip the fatal message    {ok, Fsm1} = pending(Message, Fsm),
+            case maps:find(state_mode, Fsm) of 
+                {ok, reuse} ->
+                    State = maps:get(state, Fsm),
+                    S0 = State#{status := exception},
+                    {Sign, S} = xl_state:leave(S0, {C, E}),
+                    transfer(Fsm#{reason => {C, E}, state := S}, Sign);
+                _ ->
+                    transfer(Fsm#{reason => {C, E}}, exception)
+            end
+    end.
 
--spec exit(fsm()) -> exit_ret().
+-spec exit(fsm()) -> xl_state:output().
 exit(Fsm) ->
     Reason = maps:get(reason, Fsm, normal),
-    stop_fsm(Fsm, Reason).
+    {Sign, F} = stop_fsm(Fsm, Reason),
+    Output = get_payload(F),
+    {Sign, F#{io => Output}}.
 
 %%--------------------------------------------------------------------
 %% There is a graph structure in states set.
@@ -109,36 +128,111 @@ process({xlx, _} = Notification, Fsm) ->
 process(Message, Fsm) ->
     on_message(Message, Fsm).
 
+relay(Message, #{state := State, status := running} = Fsm) ->
+    relay(Message, State, Fsm);
+relay({xlx, _, _}, Fsm) ->
+    {error, not_ready, Fsm};
+relay(_, Fsm) ->
+    {ok, unhandled, Fsm}.
+
+relay(Message, #{react := React} = State, Fsm) ->
+    case React(Message, State) of
+        {Code, S} ->
+            {Code, Fsm#{state := S}};
+        {stop, Reason, S} ->
+            {Sign, S1} = xl_state:leave(S, Reason),
+            transfer(Fsm#{state := S1}, Sign);
+        {Code, Reason, Reply, S} ->
+            {Sign, S1} = xl_state:leave(S, Reason),
+            case transfer(Fsm#{state := S1}, Sign) of
+                {ok, NewFsm} ->
+                    {ok, Reply, NewFsm};
+                {stop, R, NewFsm} ->
+                    {Code, R, Reply, NewFsm}
+            end;
+        {Code, R, S} ->
+            {Code, R, Fsm#{state := S}}
+    end;
+relay(_, _, Fsm) ->
+    {ok, unhandled, Fsm}.
+
+%% Subscribe do not relay to state.
+%% todo: special subscribe method for FSM
+on_command({_, _, subscribe}, Fsm) ->
+    {ok, unhandled, Fsm};
+on_command({_, _, {subscribe, _}}, Fsm) ->
+    {ok, unhandled, Fsm};
 %% First layer, FSM attribute. Atomic type is reserved for internal.
-on_command({_, _, Key}, Fsm) when is_atom(Key) ->
-    {ok, maps:find(Key, Fsm), Fsm};
+on_command({_, _, {get, Key}}, Fsm) when is_atom(Key) ->
+    case maps:find(Key, Fsm) of
+        {ok, V} ->
+            {ok, V, Fsm};
+        error ->
+            {error, not_found, Fsm}
+        end;
+on_command(Command, #{state_mode := reuse, status := running} = Fsm) ->
+    relay(Command, Fsm);
 on_command(Command, #{status := running, state_pid := Pid} = Fsm) ->
     Pid ! Command,  % relay message and noreply for call.
     {ok, Fsm};
 on_command(Command, #{status := failover} = Fsm) ->
     pending(Command, Fsm);
 on_command(_Command, Fsm) ->
-    {ok, {error, unhandled}, Fsm}.
+    {ok, unhandled, Fsm}.
 
+%% The very first message wake up from unload.
+on_notify({_, xlx_wakeup} = Info, #{state := S} = Fsm) ->
+    erlang:process_flag(trap_exit, true),  % restore trap_exit.
+    Actor = maps:get(actor, Fsm, self()),
+    NewS = S#{actor => Actor, fsm => self()},
+    NewF = Fsm#{state := NewS},
+    case maps:get(state_mode, NewF) of
+        reuse ->
+            relay(Info, NewF);
+        standalone ->
+            case xl_state:start_link(NewS) of
+                {ok, Pid} ->
+                    {ok, NewF#{state_pid => Pid}};
+                {error, {Sign, NewS1}} ->
+                    transfer(NewF#{state => NewS1}, Sign);
+                {error, Exception} ->
+                    transfer(NewF#{reason => Exception}, exception)
+            end
+    end;
+%% todo: notify and unsubscribe
+on_notify({_, {unsubscribe, _}}, Fsm) ->
+    {ok, unhandled, Fsm};
+on_notify({_, {notify, _}}, Fsm) ->
+    {ok, unhandled, Fsm};
 %% Queue the notification received in failover status.
 on_notify(Info, #{status := failover} = Fsm) ->
     pending(Info, Fsm);
 %% Unload command cause FSM stop and thow current FSM data dehydrated.
 on_notify({_, {stop, xlx_unload}},
+          #{state_mode := reuse, state := S, status := running} = Fsm) ->
+    case xl_state:leave(S, xlx_unload) of
+        {unloaded, State} ->
+            {stop, xlx_unload, Fsm#{state => State}};
+        NotReady ->
+            {error, NotReady, Fsm}
+    end;
+on_notify({_, {stop, xlx_unload}},
           #{state_pid := Pid, status := running} = Fsm) ->
     Timeout = maps:get(timeout, Fsm, ?DFL_TIMEOUT),
     case xl_state:unload(Pid, Timeout) of
         {unloaded, State} ->
-            {ok, Fsm#{state => State}};
+            {stop, xlx_unload, Fsm#{state => State}};
         NotReady ->
-            {stop, {error, NotReady}, Fsm}
+            {error, NotReady, Fsm}
     end;
+on_notify(Info, #{state_mode := reuse, status := running} = Fsm) ->
+    relay(Info, Fsm);
 on_notify(Info, #{state_pid := Pid,
                   status := running} = Fsm) ->
     Pid ! Info,
     {ok, Fsm};
 on_notify(_, Fsm) ->
-    {ok, {error, unhandled}, Fsm}.
+    {ok, unhandled, Fsm}.
 
 on_message(xlx_retry, #{status := failover} = Fsm) ->
     retry(Fsm); 
@@ -148,29 +242,50 @@ on_message({'EXIT', Pid, {D, S}}, #{state_pid := Pid} = Fsm) ->
     transfer(Fsm#{state := S}, D);
 on_message({'EXIT', Pid, Exception}, #{state_pid := Pid} = Fsm) ->
     transfer(Fsm#{reason => Exception}, exception);
-%% Unknown EXIT signal. Stop FSM for OTP principles.
-on_message({'EXIT', _, _} = Kill, Fsm) ->
-    {stop, Kill, Fsm};
+on_message({'EXIT', Pid, Result}, #{state_mode := reuse,
+                                    status := running,
+                                    state := #{worker := Pid} = S} = Fsm) ->
+    case xl_state:yield(Result, S) of
+        {Code, NewS} ->
+            {Code, Fsm#{state := NewS}};
+        {stop, Reason, SFail} ->
+            {Sign, S1} = xl_state:leave(SFail, Reason),
+            transfer(Fsm#{state := S1}, Sign)
+    end;
+on_message(Message, #{state_mode := reuse, status := running} = Fsm) ->
+    relay(Message, Fsm);
 on_message(Message, #{status := running,
                       state_pid := Pid} = Fsm) ->
     Pid ! Message,
     {ok, Fsm};
 on_message(_, Fsm) ->
-    {ok, {error, unhandled}, Fsm}.
+    {ok, unhandled, Fsm}.
 
 %%--------------------------------------------------------------------
 %% Main part of FSM logic, state changing.
 %%--------------------------------------------------------------------
+%% limit steps, fetch next state, load input data. 
 pre_transfer(#{steps := Steps, max_steps := MaxSteps} = Fsm, _)
   when Steps >= MaxSteps ->
     pre_transfer(Fsm#{reason => out_of_steps}, exception);
-pre_transfer(Fsm, Sign) ->
-    try
-        {ok, next(Fsm, Sign), Fsm}
+pre_transfer(#{status := Status} = Fsm, Sign) ->
+    %% You can provide your own cutomized exception and stop state.
+    try next(Fsm, Sign) of
+        stop ->
+            {stop, normal, Fsm};
+        Next when Status =:= failover ->
+            {ok, Next, Fsm#{status := running}};
+        Next ->
+            Payload = get_payload(Fsm),
+            {ok, Next#{io => Payload}, Fsm}
     catch
         error: _BadKey when Sign =:= exception ->
             {recover, Fsm};
+        error: _BadKey when Sign =:= ok ->
+            {stop, normal, Fsm};
         error: _BadKey when Sign =:= stop ->
+            {stop, normal, Fsm};
+        error: _BadKey when Sign =:= stopped ->
             {stop, normal, Fsm};
         error: _BadKey ->
             transfer(Fsm, exception)
@@ -184,6 +299,13 @@ post_transfer({ok, #{max_pending_size := Max, pending_queue := Gap} = Fsm})
 post_transfer(Result) ->
     Result.
 
+%% transfer(#{state := #{name := Name}, step := Step} = F, Sign) ->
+%%     ?debugVal({Step, Name, Sign}),
+%%     transfer_(F, Sign);
+%% transfer(F, Sign) ->
+%%     ?debugVal({fsm, Sign}),
+%%     transfer_(F, Sign).    
+
 transfer(Fsm, Sign) ->
     Step = maps:get(step, Fsm, 0),
     F1 = Fsm#{step => Step + 1},
@@ -194,17 +316,66 @@ transfer({recover, Fsm}) ->
 transfer({stop, _, _} = Stop) ->
     Stop;
 transfer({ok, NewState, Fsm}) ->
-    F1 = archive(Fsm),  % archive successful states only.
-    F2 = F1#{state => NewState},  % Keep the initial state in Fsm.
-    Actor = maps:get(actor, F2, self()),
-    case xl_state:start_link(NewState#{actor => Actor}) of
-        {ok, Pid} ->
-            {ok, F2#{state_pid => Pid}};
-        {error, {Sign, State}} ->
-            transfer(F2#{state => State}, Sign);
-        {error, Exception} ->  % For unhandled exceptions.
-            transfer(F2#{reason => Exception}, exception)
+    F1 = archive(Fsm),  % archive successful states only, for recovery.
+    Actor = maps:get(actor, F1, self()),
+    S = NewState#{actor => Actor, fsm => self()},
+    F2 = F1#{state => S},
+    Engine = engine_mode(F2),
+    F3 = maps:remove(state_pid, F2#{state_mode => Engine}),
+    case Engine of
+        standalone ->
+            case xl_state:start_link(S) of
+                {ok, Pid} ->
+                    {ok, F3#{state_pid => Pid}};
+                {error, {Sign, S1}} ->
+                    transfer(F3#{state => S1}, Sign);
+                {error, Exception} ->
+                    transfer(F3#{reason => Exception}, exception)
+            end;
+        reuse ->
+            case xl_state:enter(S) of
+                {ok, S1} ->
+                    case xl_state:do_activity(S1) of
+                        {_, S2} ->  % ok or error, but still running.
+                            {ok, F3#{state => S2}};
+                        {stop, Reason, S2} ->
+                            {Sign, Final} = xl_state:leave(S2, Reason),
+                            transfer(F3#{state => Final}, Sign)
+                    end;
+                {stop, {Flag, ErrState}} ->
+                    transfer(F3#{state => ErrState}, Flag)
+            end
     end.
+
+%% standalone is the default mode.
+engine_mode(#{state := #{engine := Mode}}) ->
+    Mode;
+engine_mode(#{engine := Mode}) ->
+    Mode;
+engine_mode(_) ->
+    standalone.
+
+%% extract payload, may be input or output.
+get_payload(#{state := S}) ->
+    maps:get(io, S, undefined);
+get_payload(#{io := Payload}) ->
+    Payload;
+get_payload(_) ->
+    undefined.
+
+%% Get input only, should be the previous state output.
+%% N is not positive data, minus means previous steps.
+get_input(#{traces := Traces} = Fsm, N) ->
+    case history(Traces, N - 1) of
+        #{io := Input} ->
+            Input;
+        _ ->  % no payload found, original input of the Fsm.
+            maps:get(io, Fsm, undefined)
+    end;
+get_input(#{io := Input}, _) ->
+    Input;
+get_input(_, _) ->
+    undefined.
 
 %%--------------------------------------------------------------------
 %% Failover and recovery.
@@ -212,19 +383,19 @@ transfer({ok, NewState, Fsm}) ->
 %% To slow down the failover progress, retry operation always
 %% triggered by message.
 recover(#{retry_count := Count, max_retry := Max} = Fsm) when Count >= Max ->
-    {stop, max_retry, Fsm#{status => exception}};
+    {stop, max_retry, Fsm#{status := exception}};
 recover(#{recovery := _} = Fsm) ->
     Interval = maps:get(retry_interval, Fsm, ?RETRY_INTERVAL),
     Count = maps:get(retry_count, Fsm, 0),
     erlang:send_after(Interval, self(), xlx_retry),
     {ok, Fsm#{status := failover, retry_count => Count + 1}};
 recover(Fsm) ->
-    {stop, exception, Fsm#{status => exception}}.
+    {stop, exception, Fsm#{status := exception}}.
 
 retry(#{recovery := Recovery} = Fsm) ->
     try mend(Recovery, Fsm) of
         NewFsm ->
-            transfer(NewFsm#{status := running}, start)
+            transfer(NewFsm, start)
     catch
         throw: Stop ->
             Stop;
@@ -244,29 +415,32 @@ mend(Rollback, Fsm) ->
 
 failover(#{states := States} = Fsm, restart, _Mode) ->  % From start point.
     Start = locate(States, start),
-    Fsm#{state => Start};
-failover(Fsm, 0, reset) -> %  Restore.
-    reset_state(Fsm);
-failover(Fsm, 0, _) ->  % Rewind.
+    Payload = maps:get(io, Fsm, undefined),
+    Fsm#{state => Start#{io => Payload}};  % reset payload also.
+%% Reset state and rollback payload.
+failover(#{state := #{name := Name}, states := States} = Fsm, 0, reset) ->
+    S = locate(States, Name),
+    Input = get_input(Fsm, 0),
+    Fsm#{state := S#{io => Input}};
+failover(Fsm, 0, _) ->  % Rewind, keep current payload untouched.
     Fsm;
-failover(#{traces := Traces} = Fsm, N, Mode) when N < 0 ->  % Rollback.
+failover(#{traces := Traces, states := States} = Fsm, N, Mode)
+  when N < 0 ->  % Rollback, back to history state.
+    Input = get_input(Fsm, N),  % is step N-1 output.
     case history(Traces, N) of
         out_of_range ->
             throw({stop, out_of_range, Fsm#{status := exception}});
-        History when Mode =:= reset ->
-            reset_state(Fsm#{state := History});
+        #{name := Name} when Mode =:= reset ->
+            S = locate(States, Name),
+            Fsm#{state := S#{io => Input}};
         History ->
-            Fsm#{state := History}
+            Fsm#{state := History#{io => Input}}  % should rollback payload.
     end;
 failover(#{states := States} = Fsm, Reroute, _Mode) ->  % Reroute.
+    Input = get_payload(Fsm),
     State = locate(States, Reroute),  % not bypass, redirect a new state
-    Fsm#{state => State}.
+    Fsm#{state => State#{io => Input}}.
     
-reset_state(#{state := State, states := States} = Fsm) ->
-    Name = maps:get(name, State),
-    NewState = locate(States, Name),
-    Fsm#{state := NewState}.
-
 %% Do not enqueue the message which crashed the state process.
 pending(_Request, #{max_pending_size := 0} = Fsm) ->
     {ok, Fsm};
@@ -322,6 +496,9 @@ stop_fsm(#{sign := Sign} = Fsm, _) ->
 stop_fsm(Fsm, _) ->
     {stopped, Fsm}.
 
+stop_1(#{state_mode := reuse, state := State} = Fsm, Reason) ->
+    {Sign, FinalState} = xl_state:leave(State, Reason),
+    {Sign, Fsm#{state => FinalState, sign => Sign}};
 stop_1(#{state_pid := Pid} = Fsm, Reason) ->
     case is_process_alive(Pid) of
         true->
@@ -330,9 +507,9 @@ stop_1(#{state_pid := Pid} = Fsm, Reason) ->
                 {Sign, FinalState} ->
                     {Sign, Fsm#{state => FinalState, sign => Sign}}
             catch
-                _: Error ->  % should be exit: timeout
+                exit: timeout ->
                     erlang:exit(Pid, kill),  % Mention case of trap exit.
-                    {Error, Fsm#{status := exception}}
+                    {abort, Fsm#{status := exception}}                    
             end;
         false ->
             {stopped, Fsm}

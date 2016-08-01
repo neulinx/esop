@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @author Gary Hai <gary@XL59.com>
-%%% @copyright (C) 2016, Neulinx Collaborations Ltd.
+%%% @copyright (C) 2016, Neulinx Platforms.
 %%% @doc
 %%%  Actor model implementation by graph topology.
 %%% @end
@@ -27,7 +27,8 @@
         #{'gid' => id(),  % Should be globally unique ID, for migration
           'name' => name(),
           'pid' => pid(),  % Actor ID, same as OTP process pid.
-          'parent' => process(), % Actor of the domain keeper.
+          'realm' => process(), % Domain keeper.
+          'actor' => process(), % parent actor to hold data.
           'links' => links(),  % states graph, loaded and unloaded.
           'monitors' => monitors(), % Local or global monitor.
           'boundary' => 'opened' | 'closed',
@@ -47,7 +48,7 @@
 -type failover() :: 'restore' | 'reset' |
                     {'restore', Mend :: map()} |
                     {'reset', Mend :: map()}.
--type result() :: xl_state:ok() | xl_state:fail().
+-type result() :: xl_state:result().
 -type reply() :: xl_state:reply().
 -type path() :: [process()].
 %%-type from() :: {path() | process(), Tag :: identifier()}.
@@ -92,31 +93,32 @@ react({'DOWN', Monitor, process, _, _Output}, Actor) ->
     {ok, A};
 %% Messages with path, relay message to next hop.
 %% Notice: it is a backdoor if PID in path, so remove it.
+react({xlx, From, [], Message}, Actor) ->
+    react({xlx, From, Message}, Actor);
 react({xlx, From, [Next | Path], Message}, Actor) ->
     %% relay to next hop
     case ensure_load(Next, Actor) of
+        {ok, Pid, A} when Path =:= [] ->
+            Pid ! {xlx, From, Message},
+            {ok, A};
         {ok, Pid, A} ->
             Pid ! {xlx, From, Path, Message},
             {ok, A};
         _Error ->
-            {ok, unreachable, Actor}
+            {error, unreachable, Actor}
     end;
-react({xlx, From, [], Message}, Actor) ->
-    react({xlx, From, Message}, Actor);
-react({xlx, From, Command}, Actor) ->
-    {Res, A} = try invoke(Command, Actor) of
-                   {ok, Result, A0} ->
-                       {{ok, Result}, A0};
-                   Error ->
-                       {Error, Actor}
-               catch
-                   _: Error ->
-                       {{error, Error}, Actor}
-               end,
-    xl_state:reply(From, Res),
-    {ok, A};
+react({xlx, _, Command}, Actor) ->
+    try invoke(Command, Actor) of
+        {Code, Reply} ->
+            {Code, Reply, Actor};
+        Res ->
+            Res
+    catch
+        C:E ->
+            {error, {C, E}, Actor}
+    end;
 react(_Message, Actor) ->
-    {ok, {error, unhandled}, Actor}.
+    {ok, unhandled, Actor}.
 
 invoke({load, Link}, Actor) ->
     ensure_load(Link, Actor);
@@ -126,29 +128,14 @@ invoke({link, Link, true}, Actor) ->
     ensure_load(Link, Actor);
 invoke({link, Link, _}, Actor) ->
     ensure_link(Link, Actor);
-invoke({unlink, Name} = Command, #{parent := R, timeout := T} = Actor) ->
-    Result = case xl_state:call(R, Command, T) of
-                 {ok, Res} ->
-                     Res;
-                 Error ->
-                     Error
-             end,
-    case unlink(Name, Actor) of
-        {ok, unlinked, A} ->
-            {ok, Result, A};
-        _Error ->
-            {ok, Result, Actor}
-    end;
+invoke({unlink, Name} = Command, #{realm := R, timeout := T} = Actor) ->
+    xl_state:call(R, Command, T),  % ignore result of realm unlink
+    unlink(Name, Actor);
 invoke({unlink, Name}, Actor) ->
     unlink(Name, Actor);
-%% default behavior is data access
-invoke(Key, Actor) ->
-    case maps:find(Key, Actor) of
-        {ok, Value} ->
-            {ok, Value, Actor};
-        error ->
-            {error, unhandled}  % not found, may chain other handler.
-    end.
+invoke(_, Actor) ->
+    {ok, unhandled, Actor}.
+
 
 %% Same as gen_server:call().
 -spec call(process(), path(), Request :: term()) -> reply().
@@ -168,7 +155,7 @@ call(Process, Path, Command, Timeout) ->
     end.
 
 %%--------------------------------------------------------------------
-%% Failover
+%% Failover, only for local link.
 %%--------------------------------------------------------------------
 %% Normal exit
 checkout(Pid, {Sign, _}, Actor) when Sign =/= exception ->
@@ -181,13 +168,16 @@ checkout(Pid, {exception, Exception}, Actor) ->
 checkout(Pid, _Exception, Actor) ->
     hotfix(undefined, Pid, Actor).
 
-hotfix(ErrState, Pid, #{links := L, monitors :=M} = Actor) ->
+hotfix(ErrState, Pid, #{links := L, monitors := M, failover := F} = Actor) ->
     {A, Name, InitState} = deactive(Pid, Actor),
-    Failover = maps:get(failover, A, restore),
-    NewState = heal(Failover, InitState, ErrState),
-    {ok, Pid} = spawn_actor(NewState, A),
-    L1 = L#{Name := {InitState, Pid}},
-    A#{links := L1, monitors := M#{Pid => Name}}.
+    NewState = heal(F, InitState, ErrState),
+    {ok, NewPid} = spawn_actor(NewState, A),
+    L1 = L#{Name := {InitState, NewPid}},
+    A#{links := L1, monitors := M#{NewPid => Name}};
+hotfix(_, Pid, Actor) ->
+    {A, _, _} = deactive(Pid, Actor),
+    A.
+
 
 heal(restore, InitState, undefined) ->
     InitState;
@@ -282,7 +272,7 @@ check_link(_, _) ->
 
 %% If gid is presented, it is global actor, fetch from realm keeper.
 %% Or current actor acts as realm keeper if no present realm.
-link_(Name, #{gid := Gid} = State, #{parent := R} = Actor, Load) ->
+link_(Name, #{gid := Gid} = State, #{realm := R} = Actor, Load) ->
     g_link(Name, Gid, R, {link, {Gid, State}, Load}, Actor);
 link_(Name, #{} = State, #{links := L, monitors := M} = Actor, true) ->
     {ok, Member} = spawn_actor(State, Actor),
@@ -293,7 +283,7 @@ link_(Name, #{} = State, #{links := L, monitors := M} = Actor, true) ->
 link_(Name, #{} = State, #{links := L} = Actor, false) ->
     A = Actor#{links := L#{Name => State}},
     {ok, Name, A};
-link_(Name, Gid, #{parent := R} = Actor, Load) ->
+link_(Name, Gid, #{realm := R} = Actor, Load) ->
     g_link(Name, Gid, R, {link, Gid, Load}, Actor);
 link_(_N, _S, _A, _L) ->
     {error, invalid}.
@@ -314,8 +304,8 @@ g_link(Name, Gid, Realm, Command,
     end.
 
 spawn_actor(State, Actor) ->
-    Realm = maps:get(parent, Actor, self()),
-    xl_state:start_link(State#{parent => Realm}).
+    Realm = maps:get(realm, Actor, self()),
+    xl_state:start_link(State#{realm => Realm, actor => self()}).
 
 %%--------------------------------------------------------------------
 %% Stop, deactivate and unlink.
@@ -345,7 +335,7 @@ cleanup(Monitor, Name, Links) ->
     Links#{Name := State}.
 
 deactive(Pid) when is_pid(Pid) ->
-    xl_state:cast(Pid, stop);
+    xl_state:cast(Pid, {stop, normal});
 deactive(Monitor) ->
     demonitor(Monitor).
 
@@ -385,12 +375,12 @@ g1_test() ->
     Al = #{b => B, c => C},
     A = new_actor(#{gid => 1, name => a, links => Al}),
     {ok, Aa} = xl_state:call(Ra, {load, A}),
-    ?assertMatch({ok, a}, xl_state:call(Aa, name)),
-    ?assertMatch({ok, c}, call(Aa, [c], name)),
-    ?assertMatch({ok, c}, call(Aa, [b, c], name)),
-    ?assertMatch({ok, x}, call(Aa, [b, x], name)),
-%    ?debugVal(xl_state:call(Ra, links)),
-%    ?debugVal(xl_state:call(Aa, links)),
+    ?assertMatch({ok, a}, xl_state:call(Aa, {get, name})),
+    %% ?debugVal(xl_state:call(Ra, {get, links})),
+    %% ?debugVal(xl_state:call(Aa, {get, links})),
+    ?assertMatch({ok, c}, call(Aa, [c], {get, name})),
+    ?assertMatch({ok, c}, call(Aa, [b, c], {get, name})),
+    ?assertMatch({ok, x}, call(Aa, [b, x], {get, name})),
     xl_state:stop(Aa),
     xl_state:stop(Ra).
     
