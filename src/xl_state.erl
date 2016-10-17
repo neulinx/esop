@@ -474,12 +474,12 @@ recast({notify, Info}, #{'_subscribers' := Subs} = State) ->
                       catch P ! {M, Info},
                       A
               end, 0, Subs),
-    State;
+    {ok, State};
 recast({unsubscribe, _} = Unsub, State) ->
     {_, _, NewState} = recall(Unsub, State),
-    NewState;
+    {ok, NewState};
 recast(_Info, State) ->
-    State.
+    {ok, State}.
 
 %%--------------------------------------------------------------------
 %% Process messages with path, when react function does not handle it.
@@ -836,7 +836,7 @@ delete(Key, State) ->
 
 %% get, put, delete, subscribe, unsubscribe, notify
 basic_test() ->
-    error_logger:tty(false),
+    error_logger:tty(true),
     {ok, Pid} = start(#{'_io' => hello}),
     {ok, running} = call(Pid, {get, '_status'}),
     {ok, Pid} = call(Pid, {get, '_pid'}),

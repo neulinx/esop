@@ -4,5 +4,5 @@ compile dialyzer clean unlock cover shell:
 reset: clean unlock
 	rm -rf _build
 test:
-	./rebar3 do eunit, cover
+	./rebar3 eunit
 .PHONY: all reset test compile dialyzer clean unlock cover shell
