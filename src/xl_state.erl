@@ -19,7 +19,7 @@
 -export([start/1, start/2, start/3]).
 -export([stop/1, stop/2, stop/3, unload/1, unload/2]).
 -export([enter/1, leave/2, do_activity/1, yield/2]).
--export([create/1, create/2, merge/2, merge/3]).
+-export([create/1, create/2]).
 -export([call/2, call/3, cast/2, reply/2]).
 -export([subscribe/1, subscribe/2, unsubscribe/2, notify/2, notify/3]).
 -export([get/2, put/3, delete/2]).
@@ -88,7 +88,6 @@
                   'undefined' |
                   'failover'.
 %-type work_mode() :: 'async' | 'sync'.
--type mix_mode() :: 'inner_first' | 'outer_first' | 'takeover'.
 -type reason() :: 'normal' | 'unload' | term(). 
 -type entry() :: fun((state()) -> result()).
 -type exit() :: fun((state()) -> output()).
@@ -183,87 +182,6 @@ create(Module, Data) when is_map(Data) ->
 create(Module, Data) when is_list(Data) ->
     create(Module, maps:from_list(Data)).
 
-%% Merges two states into a single state. If two keys exists in both states
-%% the value in State1 will be superseded by the value in State2.
-%% Actions merge according to the mix_mode parameter.
-%% Todo: add a mix mode for handle message both.
--spec merge(state(), state()) -> state().
-merge(Inner, Outer) ->
-    merge(Inner, Outer, inner_first).
-
--spec merge(state(), state(), mix_mode()) -> state().
-%% merge(#{'_work_mode' := async}, _, _) ->
-%%     error(invalid);
-%% merge(_, #{'_work_mode' := async}, _) ->
-%%     error(invalid);
-merge(Inner, Outer, inner_first) ->
-    M1 = mix_entry(Inner, Outer, #{}),
-    M2 = mix_do(Inner, Outer, M1),
-    M3 = mix_react(Inner, Outer, M2),
-    M4 = mix_exit(Inner, Outer, M3),
-    State = maps:merge(Inner, Outer),
-    maps:merge(State, M4);
-merge(Inner, Outer, outer_first) ->
-    M1 = mix_entry(Inner, Outer, #{}),
-    M2 = mix_do(Inner, Outer, M1),
-    M3 = mix_react(Outer, Inner, M2),
-    M4 = mix_exit(Inner, Outer, M3),
-    State = maps:merge(Inner, Outer),
-    maps:merge(State, M4);
-merge(Inner, Outer, takeover) ->
-    I = maps:without(['_entry', '_do', '_react', '_exit'], Inner),
-    maps:merge(I, Outer).
-
-%% Enter outer first then inner.
-mix_entry(#{'_entry' := E1}, #{'_entry' := E2}, M) ->
-    F = fun(S) ->
-                case E2(S) of
-                    {ok, NewS} ->
-                        E1(NewS);
-                    Error ->
-                        Error
-                end
-        end,
-    M#{'_entry' => F};
-mix_entry(_, _, M) ->
-    M.
-
-%% Leave inner first then outer
-mix_exit(#{'_exit' := E1}, #{'_exit' := E2}, M) ->
-    F = fun(S) ->
-                {Sign, Final} = E1(S),
-                E2(Final#{'_sign' => Sign})
-        end,
-    M#{'_exit' => F};
-mix_exit(_, _, M) ->
-    M.
-
-mix_react(#{'_react' := R1}, #{'_react' := R2}, M) ->
-    F = fun(Info, State) ->
-                case R1(Info, State) of
-                    {ok, unhandled, NewS} ->
-                        R2(Info, NewS);
-                    Handled ->
-                        Handled
-                end
-        end,
-    M#{'_react' => F};
-mix_react(_, _, M) ->
-    M.
-
-mix_do(#{'_do' := D1}, #{'_do' := D2}, M) ->
-    F = fun(S) ->
-            case D1(S) of
-                {ok, NewS} ->
-                    D2(NewS);
-                Stop ->
-                    Stop
-            end
-        end,
-    M#{'_do' => F};
-mix_do(_, _, M) ->
-    M.
-    
 %%--------------------------------------------------------------------
 %% gen_server callback. Initializes the server with state action entry.
 %%--------------------------------------------------------------------
@@ -836,7 +754,7 @@ delete(Key, State) ->
 
 %% get, put, delete, subscribe, unsubscribe, notify
 basic_test() ->
-    error_logger:tty(true),
+    error_logger:tty(false),
     {ok, Pid} = start(#{'_io' => hello}),
     {ok, running} = call(Pid, {get, '_status'}),
     {ok, Pid} = call(Pid, {get, '_pid'}),
