@@ -64,12 +64,13 @@
             } | map().
 -type tag() :: 'xlx'.
 -type key() :: atom() | string() | binary().
--type code() :: 'ok' | 'error' | 'stop' | 'pending' | atom().
 -type request() :: {tag(), from(), Command :: term()} |
                    {tag(), from(), Path :: list(), Command :: term()}.
 -type notification() :: {tag(), Notification :: term()}.
 -type message() :: request() | notification().
--type result() :: {code(), state()} |
+-type code() :: 'ok' | 'error' | 'stop' | 'pending' | key().
+-type result() :: {'noreply', state()} |
+                  {code(), state()} |
                   {code(), term(), state()} |
                   {code(), Stop :: reason(), Reply :: term(), state()}.
 -type output() :: {'stopped', state()} |
@@ -290,15 +291,21 @@ handle_2({xlx, hibernate}, {ok, State}) ->
     {noreply, State, hibernate};
 handle_2({xlx, hibernate}, {ok, _, State}) ->
     {noreply, State, hibernate};
-%% reply message before gen_server
-%% Four elements of tuple is stop signal.
+%% Reply is not here when code is noreply or stop
+handle_2({xlx, _From, _}, {noreply, State}) ->
+    {noreply, State};
+handle_2({xlx, _From, _}, {stop, Reason, S}) ->
+    {stop, Reason, S};
+%% reply special message other than gen_server.
+%% Four elements of tuple is stop signal. Code is not always 'stop'.
 handle_2({xlx, From, _}, {Code, Reason, Reply, S}) ->
     reply(From, {Code, Reply}),
     {stop, Reason, S};
-handle_2({xlx, _From, _}, {stop, Reason, S}) ->
-    {stop, Reason, S};
 handle_2({xlx, From, _}, {Code, Reply, S}) ->
     reply(From, {Code, Reply}),
+    {noreply, S};
+handle_2({xlx, From, _}, {Code, S}) ->
+    reply(From, Code),
     {noreply, S};
 handle_2(_, {stop, S}) ->
     Reason = maps:get('_reason', S, normal),
@@ -354,7 +361,7 @@ recall({put, Key, _, _}, State) when is_atom(Key) ->
     {error, forbidden, State};
 recall({put, Key, Value, raw}, State) ->
     NewS = maps:put(Key, Value, State),
-    {ok, updated, NewS};
+    {ok, NewS};
 recall({put, Key, Value, active}, State) ->
     put(Key, Value, State);
 recall({delete, Key}, State) ->
@@ -363,7 +370,7 @@ recall({delete, Key, _}, State) when is_atom(Key) ->
     {error, forbidden, State};
 recall({delete, Key, raw}, State) ->
     NewS = maps:remove(Key, State),
-    {ok, deleted, NewS};
+    {ok, NewS};
 recall({delete, Key, active}, State) ->
     delete(Key, State);
 recall({subscribe, Pid}, State) ->
@@ -374,7 +381,7 @@ recall({subscribe, Pid}, State) ->
 recall({unsubscribe, Mref}, #{'_subscribers' := Subs} = State) ->
     demonitor(Mref),
     Subs1 = maps:remove(Mref, Subs),
-    {ok, unsubscribed, State#{'_subscribers' := Subs1}};
+    {ok, State#{'_subscribers' := Subs1}};
 recall(_, State) ->
     {error, unknown, State}.
 
@@ -385,7 +392,7 @@ recast({notify, Info}, #{'_subscribers' := Subs} = State) ->
               end, 0, Subs),
     {ok, State};
 recast({unsubscribe, _} = Unsub, State) ->
-    {_, _, NewState} = recall(Unsub, State),
+    {_, NewState} = recall(Unsub, State),
     {ok, NewState};
 recast(_Info, State) ->
     {ok, State}.
@@ -402,10 +409,10 @@ traverse(From, [Key | Path], Command, State) ->
             case invoke(Command, Key, Path, Package, NewS) of
                 error ->
                     {error, not_found, NewS};
+                {dirty, DirtyS} ->
+                    {ok, DirtyS};
                 {Code, Value} ->
-                    {Code, Value, NewS};
-                Result ->
-                    Result
+                    {Code, Value, NewS}
             end;
         Error ->
             Error
@@ -415,8 +422,8 @@ invoke(Command, Key, [], Data, Container) ->
     invoke_(Command, Key, Data, Container);
 invoke(Command, Key, [Next | Path], Branch, Container) ->
     case invoke(Command, Next, Path, Branch) of
-        {ok, Value, NewBranch} ->
-            {ok, Value, Container#{Key := NewBranch}};
+        {dirty, NewBranch} ->
+            {dirty, Container#{Key := NewBranch}};
         NotChange ->
             NotChange
     end.
@@ -427,8 +434,8 @@ invoke(Command, Key, Path, Container) ->
     case maps:find(Key, Container) of
         {ok, Value} ->
             invoke(Command, Key, Path, Value, Container);
-        Error ->
-            Error
+        error ->
+            error
     end.
 
 invoke_(get, _Key, Value, _Container) ->
@@ -440,10 +447,10 @@ invoke_(get, Key, Container) ->
     maps:find(Key, Container);
 invoke_({put, Value}, Key, Container) ->
     NewC = maps:put(Key, Value, Container),
-    {ok, updated, NewC};
+    {dirty, NewC};
 invoke_(delete, Key, Container) ->
     NewC = maps:remove(Key, Container),
-    {ok, deleted, NewC};
+    {dirty, NewC};
 invoke_(_Unknown, _, _) ->
     {error, unknown}.
 
@@ -664,13 +671,13 @@ try_link(_Key, State) ->
 put(Key, Value, State) ->
     case maps:find(Key, State) of
         {ok, V} when is_pid(V) ->
-            {ok, deleted, S1} = delete(Key, State),
+            {ok, S1} = delete(Key, State),
             active(Key, Value, S1);
         _ ->
             active(Key, Value, State)
     end.
 
--spec delete(key(), state()) -> {'ok', 'deleted', state()} |
+-spec delete(key(), state()) -> {'ok', state()} |
                                 {'error', 'not_found', state()}.
 delete(Key, #{'_monitors' := M} = State) ->
     case maps:find(Key, State) of
@@ -678,12 +685,12 @@ delete(Key, #{'_monitors' := M} = State) ->
             erlang:unlink(V),
             M1 = maps:remove(V, M),
             S1 = maps:remove(Key, State),
-            {ok, deleted, S1#{'_monitors' := M1}};
+            {ok, S1#{'_monitors' := M1}};
         _ ->
-            {ok, deleted, maps:remove(Key, State)}
+            {ok, maps:remove(Key, State)}
     end;
 delete(Key, State) ->
-    {ok, deleted, maps:remove(Key, State)}.
+    {ok, maps:remove(Key, State)}.
 
 %%%===================================================================
 %%% Unit test
@@ -692,15 +699,15 @@ delete(Key, State) ->
 
 %% get, put, delete, subscribe, unsubscribe, notify
 basic_test() ->
-    error_logger:tty(false),
+    error_logger:tty(true),
     {ok, Pid} = start(#{'_io' => hello}),
     {ok, running} = call(Pid, {get, '_status'}),
     {ok, Pid} = call(Pid, {get, '_pid'}),
     {error, forbidden} = call(Pid, {put, a, 1}),
-    {ok, updated} = call(Pid, {put, "a", a}),
+    ok = call(Pid, {put, "a", a}),
     {ok, a} = call(Pid, {get, "a"}),
     {error, forbidden} = call(Pid, {delete, a}),
-    {ok, deleted} = call(Pid, {delete, "a"}),
+    ok = call(Pid, {delete, "a"}),
     {error, not_found} = call(Pid, {get, "a"}),
     {ok, Ref} = subscribe(Pid),
     notify(Pid, test),
