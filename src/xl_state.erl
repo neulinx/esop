@@ -18,7 +18,6 @@
 -export([start_link/1, start_link/2, start_link/3]).
 -export([start/1, start/2, start/3]).
 -export([stop/1, stop/2, stop/3, unload/1, unload/2]).
--export([enter/1, leave/2, do_activity/1, yield/2]).
 -export([create/1, create/2]).
 -export([call/2, call/3, cast/2, reply/2]).
 -export([subscribe/1, subscribe/2, unsubscribe/2, notify/2, notify/3]).
@@ -52,7 +51,6 @@
              '_react' => react(),
              '_exit' => exit(),
              '_pid' => pid(),
-             '_worker' => pid(),
              '_io' => term(),  % Input or output data as payload of state.
              '_sign' => term(),
              '_reason' => reason(),
@@ -61,7 +59,6 @@
              '_entry_time' => pos_integer(),
              '_exit_time' => pos_integer()
 %             <<"behavior">> => behavior(),
-%             <<"_work_mode">> => work_mode(),  % default: sync
 %             <<"_timeout">> => timeout(),  % default: 5000
 %             <<"_hibernate">> => timeout()  % mandatory, default: infinity
             } | map().
@@ -87,7 +84,6 @@
                   'exception' |
                   'undefined' |
                   'failover'.
-%-type work_mode() :: 'async' | 'sync'.
 -type reason() :: 'normal' | 'unload' | term(). 
 -type entry() :: fun((state()) -> result()).
 -type exit() :: fun((state()) -> output()).
@@ -151,7 +147,7 @@ create(Module, Data) when is_map(Data) ->
         true ->
             Module:create(Data);
         _ ->
-            A0 = #{},
+            A0 = Data,
             A1 = case erlang:function_exported(Module, entry, 1) of
                      true->
                          A0#{'_entry' => fun Module:entry/1};
@@ -170,13 +166,12 @@ create(Module, Data) when is_map(Data) ->
                      false ->
                          A2
                  end,
-            A4 = case erlang:function_exported(Module, exit, 1) of
-                     true->
-                         A3#{'_exit' => fun Module:exit/1};
-                     false ->
-                         A3
-                 end,
-            maps:merge(A4, Data)
+            case erlang:function_exported(Module, exit, 1) of
+                true->
+                    A3#{'_exit' => fun Module:exit/1};
+                false ->
+                    A3
+            end
     end;
 %% Convert data type from proplists to maps as type state().
 create(Module, Data) when is_list(Data) ->
@@ -198,7 +193,6 @@ init(State) ->
             Stop
     end.
 
--spec enter(state()) -> result().
 enter(State) ->
     EntryTime = erlang:system_time(),
     State1 = State#{'_entry_time' => EntryTime,
@@ -335,9 +329,6 @@ default_react({xlx, From, Path, Command}, State) ->
 default_react({'DOWN', M, process, _, _}, #{'_subscribers' := Subs} = S) ->
     Subs1 = maps:remove(M, Subs),
     {ok, S#{'_subscribers' := Subs1}};  % todo: DOWN for links
-default_react({'EXIT', From, Output}, #{'_worker' := From} = State) ->
-    NewS = maps:remove('_worker', State),
-    yield(Output, NewS);
 %% Gracefully leave state when receive unhandled EXIT signal.
 default_react({'EXIT', _, _} = Kill, State) ->
     {stop, Kill, State};  % todo: handler for 'EXIT'
@@ -460,39 +451,17 @@ invoke_(_Unknown, _, _) ->
 %% Time-consuming activity in two mode: sync or async.
 %% async mode is perfered.
 %%--------------------------------------------------------------------
--spec do_activity(state()) -> result().
 do_activity(#{'_do' := Do} = State) when is_function(Do) ->
-    case maps:get(<<"_work_mode">>, State, sync) of
-        async ->
-            erlang:process_flag(trap_exit, true),  % Potentially block exit.
-            %% worker can not alert state directly.
-            Worker = spawn_link(fun() -> Do(State) end),
-            {ok, State#{'_worker' => Worker}};
-        _sync ->
-            %% Block gen_server work loop, 
-            %% mention the timeout of gen_server response.
-            try
-                Do(State)
-            catch
-                C:E ->
-                    {stop, {C, E}, State#{'_status' => exception}}
-            end
+    %% Block gen_server work loop, 
+    %% mention the timeout of gen_server response.
+    try
+        Do(State)
+    catch
+        C:E ->
+            {stop, {C, E}, State#{'_status' => exception}}
     end;
 do_activity(State) ->
     {ok, State}.
-
--spec yield(Output :: term(), state()) -> result().
-%% Merge output into state.
-yield({Code, #{} = Result}, State) ->  % work done.
-    {Code, maps:merge(State, Result)};
-yield({Code, _} = Output, State) ->  % work done.
-    {Code, State#{'_io' => Output}};
-yield({stop, Reason, #{} = Result}, State) ->  % work done and stop.
-    {stop, Reason, maps:merge(State, Result)};
-yield({Code, Reason, Result}, State) ->  % work done and stop.
-    {stop, Reason, State#{'_io' => {Code, Result}}};
-yield(Exception, State) ->  % unknown error
-    {stop, Exception, State#{'_status' := exception}}.
 
 %%--------------------------------------------------------------------
 %% This function is called by a gen_server when it is about to
@@ -505,28 +474,15 @@ yield(Exception, State) ->  % unknown error
 terminate(Reason, State) ->
     erlang:exit(leave(State, Reason)).
 
--spec leave(state(), Reason :: term()) -> output().
 leave(State, xlx_unload) ->  % unload command do not call exit action.
-    Sunload = case ensure_stopped(State, xlx_unload) of
-            {_, S} ->
-                S;
-            {stop, _, S} ->
-                S
-        end,
-    Final = final_notify(Sunload, unload),
+    Final = final_notify(State, unload),
     %% notice: please remove subscribers when persistent in database.
     {unloaded, Final};
 leave(State, Reason) ->
     {Sign, Sexit} = try_exit(State#{'_reason' => Reason}),
-    Sstop = case ensure_stopped(Sexit, Reason) of
-            {_, S} ->
-                S;
-            {stop, _, S} ->
-                S
-        end,
-    Sfinal = Sstop#{'_exit_time' => erlang:system_time()},
+    Sfinal = Sexit#{'_exit_time' => erlang:system_time()},
     Output = maps:get('_io', Sfinal, undefined),
-    FinalState = final_notify(Sexit, {stop, {Sign, Output}}),
+    FinalState = final_notify(Sfinal, {stop, {Sign, Output}}),
     case maps:find('_status', FinalState) of
         {ok, Status} when Status =/= running ->
             {Sign, FinalState};
@@ -543,24 +499,6 @@ final_notify(#{'_subscribers' := Subs} = State, Info) ->
     maps:remove('_subscribers', State);
 final_notify(State, _) ->
     State.
-
-ensure_stopped(#{'_worker' := Worker} = State, Reason) ->
-    case is_process_alive(Worker) of
-        true->
-            unlink(Worker),  % Provide from crash unexpected.
-            Timeout = maps:get(<<"_timeout">>, State, ?DFL_TIMEOUT),
-            try 
-                yield(stop(Worker, Reason, Timeout), State)
-            catch
-                exit: timeout ->
-                    erlang:exit(Worker, kill),
-                    {stop, abort, State}
-            end;
-        false ->
-            {stop, stopped, State}
-    end;
-ensure_stopped(State, _) ->
-    {stop, stopped, State}.
 
 %% Mind the priority of sign extracting.
 try_exit(#{'_exit' := Exit} = State) ->
