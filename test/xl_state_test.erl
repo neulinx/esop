@@ -15,7 +15,9 @@
 %%%-------------------------------------------------------------------
 unit_test_() ->
     error_logger:tty(false),
-    {timeout, 5, [{"Basic access and subscribe", fun test1/0}]}.
+    {timeout, 1, [{"Basic access and subscribe", fun test1/0},
+                  {"Data traversal", fun test2/0}
+                 ]}.
 
 %%%-------------------------------------------------------------------
 %% get, put, delete, subscribe, unsubscribe, notify
@@ -51,3 +53,25 @@ test1() ->
                                            Notify ->
                                                Notify
                                        end.
+
+%%%-------------------------------------------------------------------
+%% Hierarchical Data traversal
+%% a1.a2.a3.key = 123
+%%%-------------------------------------------------------------------
+test2() ->
+    D4 = #{"key" => 123},
+    D3 = #{"a3" => D4},
+    D2 = #{"a2" => D3},
+    D1 = #{"a1" => D2},
+    {ok, Pid} = xl_state:start(D1),
+    {ok, 123} = xl_state:call(Pid, get, ["a1", "a2", "a3", "key"]),
+    {ok, D4} = xl_state:call(Pid, get, ["a1", "a2", "a3"]),
+    ok = xl_state:call(Pid, {put, 456}, ["a1", "a2", "a3", "key"]),
+    {ok, 456} = xl_state:call(Pid, get, ["a1", "a2", "a3", "key"]),
+    ok = xl_state:call(Pid, {put, 789}, ["a1", "a2", "key2"]),
+    {ok, 789} = xl_state:call(Pid, get, ["a1", "a2", "key2"]),
+    ok = xl_state:call(Pid, delete, ["a1", "a2", "key2"]),
+    {error, not_found} = xl_state:call(Pid, get, ["a1", "a2", "key2"]),
+    ok = xl_state:call(Pid, {put, b1}, ["b1"]),
+    {ok, b1} = xl_state:get(Pid, "b1"),
+    xl_state:stop(Pid).

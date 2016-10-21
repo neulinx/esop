@@ -19,7 +19,7 @@
 -export([start/1, start/2, start/3]).
 -export([stop/1, stop/2, stop/3, unload/1, unload/2]).
 -export([create/1, create/2]).
--export([call/2, call/3, cast/2, reply/2]).
+-export([call/2, call/3, call/4, cast/2, reply/2]).
 -export([subscribe/1, subscribe/2, unsubscribe/2, notify/2, notify/3]).
 -export([get/2, put/3, delete/2]).
 
@@ -64,6 +64,7 @@
             } | map().
 -type tag() :: 'xlx'.
 -type key() :: atom() | string() | binary().
+-type path() :: [key()].
 -type request() :: {tag(), from(), Command :: term()} |
                    {tag(), from(), Path :: list(), Command :: term()}.
 -type notification() :: {tag(), Notification :: term()}.
@@ -225,7 +226,7 @@ enter_(State) ->
                          {stop, reason(), reply(), state()} |
                          {stop, reason(), state()}.
 handle_call(Request, From, State) ->
-    handle_info({xlx, From, Request}, State).
+    handle_info({xlx, From, [], Request}, State).
 
 %% Handling async cast messages.
 %% {stop, Reason} is special notification to stop or transfer the state.
@@ -247,11 +248,11 @@ handle_info(Message,  State) ->
     handle_3(Res2).
 
 %% empty path, the last hop.
-normalize_msg({xlx, From, [], Command}) ->
-    {xlx, From, Command};
+normalize_msg({xlx, From, Command}) ->
+    {xlx, From, [], Command};
 %% sugar for subscribe.
-normalize_msg({xlx, {Pid, _} = From, subscribe}) ->
-    {xlx, From, {subscribe, Pid}};
+normalize_msg({xlx, {Pid, _} = From, Path, subscribe}) ->
+    {xlx, From, Path, {subscribe, Pid}};
 %% gen_server timeout as hibernate command.
 normalize_msg(tiemout) ->
     {xlx, hibernate};
@@ -292,19 +293,19 @@ handle_2({xlx, hibernate}, {ok, State}) ->
 handle_2({xlx, hibernate}, {ok, _, State}) ->
     {noreply, State, hibernate};
 %% Reply is not here when code is noreply or stop
-handle_2({xlx, _From, _}, {noreply, State}) ->
+handle_2({xlx, _From, _, _}, {noreply, State}) ->
     {noreply, State};
-handle_2({xlx, _From, _}, {stop, Reason, S}) ->
+handle_2({xlx, _From, _, _}, {stop, Reason, S}) ->
     {stop, Reason, S};
 %% reply special message other than gen_server.
 %% Four elements of tuple is stop signal. Code is not always 'stop'.
-handle_2({xlx, From, _}, {Code, Reason, Reply, S}) ->
+handle_2({xlx, From, _, _}, {Code, Reason, Reply, S}) ->
     reply(From, {Code, Reply}),
     {stop, Reason, S};
-handle_2({xlx, From, _}, {Code, Reply, S}) ->
+handle_2({xlx, From, _, _}, {Code, Reply, S}) ->
     reply(From, {Code, Reply}),
     {noreply, S};
-handle_2({xlx, From, _}, {Code, S}) ->
+handle_2({xlx, From, _, _}, {Code, S}) ->
     reply(From, Code),
     {noreply, S};
 handle_2(_, {stop, S}) ->
@@ -327,10 +328,10 @@ handle_3(Result) ->
 %%--------------------------------------------------------------------
 %% Default message handler called when message is 'unhandled' by react function.
 %%--------------------------------------------------------------------
-default_react({xlx, _From, Command}, State) ->
-    recall(Command, State);
 default_react({xlx, Info}, State) ->
     recast(Info, State);
+default_react({xlx, _From, [], Command}, State) ->
+    recall(Command, State);
 default_react({xlx, From, Path, Command}, State) ->
     traverse(From, Path, Command, State);
 default_react({'DOWN', M, process, _, _}, #{'_subscribers' := Subs} = S) ->
@@ -537,17 +538,24 @@ code_change(_OldVsn, State, _Extra) ->
 -spec reply(from(), Reply :: term()) -> 'ok'.
 reply({To, Tag}, Reply) ->
     catch To ! {Tag, Reply},
+    ok;
+reply(undefined, _) ->
     ok.
+
 
 %% Same as gen_server:call().
 -spec call(process(), Request :: term()) -> reply().
 call(Process, Command) ->
-    call(Process, Command, infinity).
+    call(Process, Command, [], infinity).
 
--spec call(process(), Request :: term(), timeout()) -> reply().
-call(Process, Command, Timeout) ->
+-spec call(process(), Request :: term(), path()) -> reply().
+call(Process, Command, Path) ->
+    call(Process, Command, Path, infinity).
+
+-spec call(process(), Request :: term(), path(), timeout()) -> reply().
+call(Process, Command, Path, Timeout) ->
     Tag = make_ref(),
-    Process ! {xlx, {self(), Tag}, Command},
+    Process ! {xlx, {self(), Tag}, Path, Command},
     receive
         {Tag, Result} ->
             Result
@@ -556,7 +564,7 @@ call(Process, Command, Timeout) ->
             {error, timeout}
     end.
 
-%% Same as gen_server:cast().
+%% Same as gen_server:cast(). cast not support path, which is not traceable.
 -spec cast(process(), Notify :: term()) -> 'ok'.
 cast(Process, Notification) ->
     catch Process ! {xlx, Notification},
