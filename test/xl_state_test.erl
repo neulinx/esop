@@ -73,5 +73,8 @@ test2() ->
     ok = xl_state:call(Pid, delete, ["a1", "a2", "key2"]),
     {error, not_found} = xl_state:call(Pid, get, ["a1", "a2", "key2"]),
     ok = xl_state:call(Pid, {put, b1}, ["b1"]),
-    {ok, b1} = xl_state:get(Pid, "b1"),
+    {ok, b1} = xl_state:call(Pid, {get, "b1"}),
+    {ok, b1} = xl_state:call(Pid, get, ["b1"]),
+    ok = xl_state:call(Pid, delete, ["b1"]),
+    {error, not_found} = xl_state:call(Pid, get, ["b1"]),
     xl_state:stop(Pid).

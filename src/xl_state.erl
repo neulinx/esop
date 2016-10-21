@@ -401,6 +401,12 @@ recast(_Info, State) ->
 %%--------------------------------------------------------------------
 %% Process messages with path, when react function does not handle it.
 %%--------------------------------------------------------------------
+traverse(_, [Key], get, State) ->
+    recall({get, Key}, State);
+traverse(_, [Key], {put, Value}, State) ->
+    recall({put, Key, Value}, State);
+traverse(_, [Key], delete, State) ->
+    recall({delete, Key}, State);
 traverse(From, [Key | Path], Command, State) ->
     case get(Key, State) of
         {ok, Pid, NewS} when is_pid(Pid) ->
@@ -420,18 +426,18 @@ traverse(From, [Key | Path], Command, State) ->
     end.
 
 invoke(Command, Key, [], Data, Container) ->
-    invoke_(Command, Key, Data, Container);
+    invoke1(Command, Key, Data, Container);
 invoke(Command, Key, [Next | Path], Branch, Container) ->
-    case invoke(Command, Next, Path, Branch) of
+    case invoke0(Command, Next, Path, Branch) of
         {dirty, NewBranch} ->
             {dirty, Container#{Key := NewBranch}};
         NotChange ->
             NotChange
     end.
 
-invoke(Command, Key, [], Container) ->
-    invoke_(Command, Key, Container);
-invoke(Command, Key, Path, Container) ->
+invoke0(Command, Key, [], Container) ->
+    invoke2(Command, Key, Container);
+invoke0(Command, Key, Path, Container) ->
     case maps:find(Key, Container) of
         {ok, Value} ->
             invoke(Command, Key, Path, Value, Container);
@@ -439,20 +445,20 @@ invoke(Command, Key, Path, Container) ->
             error
     end.
 
-invoke_(get, _Key, Value, _Container) ->
+invoke1(get, _Key, Value, _Container) ->
     {ok, Value};
-invoke_(Command, Key, _Value, Container) ->
-    invoke_(Command, Key, Container).
+invoke1(Command, Key, _Value, Container) ->
+    invoke2(Command, Key, Container).
 
-invoke_(get, Key, Container) ->
+invoke2(get, Key, Container) ->
     maps:find(Key, Container);
-invoke_({put, Value}, Key, Container) ->
+invoke2({put, Value}, Key, Container) ->
     NewC = maps:put(Key, Value, Container),
     {dirty, NewC};
-invoke_(delete, Key, Container) ->
+invoke2(delete, Key, Container) ->
     NewC = maps:remove(Key, Container),
     {dirty, NewC};
-invoke_(_Unknown, _, _) ->
+invoke2(_Unknown, _, _) ->
     {error, unknown}.
 
 %%--------------------------------------------------------------------
