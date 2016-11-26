@@ -17,7 +17,7 @@
 %% API
 -export([start_link/1, start_link/2, start_link/3]).
 -export([start/1, start/2, start/3]).
--export([stop/1, stop/2, stop/3, unload/1, unload/2]).
+-export([stop/1, stop/2, stop/3]).
 -export([create/1, create/2]).
 -export([call/2, call/3, call/4, cast/2, reply/2]).
 -export([subscribe/1, subscribe/2, unsubscribe/2, notify/2, notify/3]).
@@ -28,6 +28,8 @@
          terminate/2, code_change/3]).
 
 -define(DFL_TIMEOUT, 4000).  %% Smaller than gen:call timeout.
+-define(MAX_TRACES, 1000).  %% Default trace log limit.
+
 %%%===================================================================
 %%% Common types
 %%%===================================================================
@@ -38,7 +40,9 @@
               reply/0,
               output/0]).
  
--type name() :: {local, atom()} | {global, atom()} | {via, atom(), term()}.
+-type server_name() :: {local, atom()} |
+                       {global, atom()} |
+                       {via, atom(), term()}.
 -type from() :: {To :: process(), Tag :: identifier()}.
 -type process() :: pid() | (LocalName :: atom()).
 -type start_ret() ::  {'ok', pid()} | 'ignore' | {'error', term()}.
@@ -46,24 +50,36 @@
         {'timeout', Time :: timeout()} |
         {'spawn_opt', [proc_lib:spawn_option()]}.
 -type state() :: #{
+%%---------- state base attributes --------
              '_entry' => entry(),
-             '_do' => do(),
              '_react' => react(),
              '_exit' => exit(),
              '_pid' => pid(),
-             '_io' => term(),  % Input or output data as payload of state.
-             '_sign' => term(),
              '_reason' => reason(),
              '_status' => status(),
              '_subscribers' => map(),
              '_entry_time' => pos_integer(),
-             '_exit_time' => pos_integer()
+             '_exit_time' => pos_integer(),
+%%---------- FSM attributes --------
+             '_state' => pid() | state() | term(),
+             '_states' => map() | function(),
+             '_fsm' => pid(),
+             '_step' => non_neg_integer()
+%%---------- Customized attributes --------
+%             <<"_max_steps">> => limit(),
+%             <<"_recovery">> => recovery(),
+%             <<"_max_retry">> => limit(),
+%             <<"_retry_count">> => non_neg_integer(),
+%             <<"_retry_interval">> => non_neg_integer()
+%             <<"_name">> => name(),
 %             <<"behavior">> => behavior(),
 %             <<"_timeout">> => timeout(),  % default: 5000
 %             <<"_hibernate">> => timeout()  % mandatory, default: infinity
             } | map().
--type tag() :: 'xlx'.
+
 -type key() :: atom() | string() | binary().
+
+-type tag() :: 'xlx'.
 -type path() :: [key()].
 -type request() :: {tag(), from(), Command :: term()} |
                    {tag(), from(), Path :: list(), Command :: term()}.
@@ -74,23 +90,23 @@
                   {code(), state()} |
                   {code(), term(), state()} |
                   {code(), Stop :: reason(), Reply :: term(), state()}.
--type output() :: {'stopped', state()} |
-                  {'exception', state()} |
-                  {Sign :: term(), state()}.
+-type output() :: {'stopped', term()} |
+                  {'exception', term()} |
+                  {'EXIT', term()} |
+                  {Sign :: term(), term()}.
 -type reply() :: {'ok', term()} | 'ok' |
                  {'error', term()} | 'error' |
                  {'stop', term()} |
                  term().
 -type status() :: 'running' |
+                  'stopping' |
                   'stopped' |
                   'exception' |
-                  'undefined' |
                   'failover'.
 -type reason() :: 'normal' | 'unload' | term(). 
 -type entry() :: fun((state()) -> result()).
 -type exit() :: fun((state()) -> output()).
 -type react() :: fun((message() | term(), state()) -> result()).
--type do() :: fun((state()) -> result() | no_return()).
 
 %%-type behavior() :: 'state' | <<"state">> | module() | binary().
 
@@ -106,7 +122,7 @@ start_link(State, Options) ->
     Opts = merge_options(Options, State),
     gen_server:start_link(?MODULE, State, Opts).
 
--spec start_link(name(), state(), [start_opt()]) -> start_ret().
+-spec start_link(server_name(), state(), [start_opt()]) -> start_ret().
 start_link(undefined, State, Options) ->
     start_link(State, Options);
 start_link(Name, State, Options) ->
@@ -122,7 +138,7 @@ start(State, Options) ->
     Opts = merge_options(Options, State),
     gen_server:start(?MODULE, State, Opts).
 
--spec start(name(), state(), [start_opt()]) -> start_ret().
+-spec start(server_name(), state(), [start_opt()]) -> start_ret().
 start(undefined, State, Options) ->
     start(State, Options);
 start(Name, State, Options) ->
@@ -149,30 +165,23 @@ create(Module, Data) when is_map(Data) ->
         true ->
             Module:create(Data);
         _ ->
-            A0 = Data,
             A1 = case erlang:function_exported(Module, entry, 1) of
                      true->
-                         A0#{'_entry' => fun Module:entry/1};
+                         Data#{'_entry' => fun Module:entry/1};
                      false ->
-                         A0
+                         Data
                  end,
-            A2 = case erlang:function_exported(Module, do, 1) of
+            A2 = case erlang:function_exported(Module, react, 2) of
                      true->
-                         A1#{'_do' => fun Module:do/1};
+                         A1#{'_react' => fun Module:react/2};
                      false ->
                          A1
                  end,
-            A3 = case erlang:function_exported(Module, react, 2) of
-                     true->
-                         A2#{'_react' => fun Module:react/2};
-                     false ->
-                         A2
-                 end,
             case erlang:function_exported(Module, exit, 1) of
                 true->
-                    A3#{'_exit' => fun Module:exit/1};
+                    A2#{'_exit' => fun Module:exit/1};
                 false ->
-                    A3
+                    A2
             end
     end;
 %% Convert data type from proplists to maps as type state().
@@ -187,34 +196,84 @@ init(#{'_status' := running} = State) ->  % resume suspended state.
     cast(self(), xlx_wakeup),  % notify to prepare state resume.
     {ok, State#{'_pid' => self()}};
 init(State) ->
-    case enter(State) of
-        {ok, S} ->
-            self() ! '_xlx_do_activity',  % Trigger off activity.
-            {ok, S};
+    State1 = State#{'_entry_time' => erlang:system_time(),
+                    '_pid' =>self(), '_status' => running},
+    case enter(State1) of
+        {ok, State2} ->
+            init_fsm(State2);
         Stop ->
             Stop
     end.
 
-enter(State) ->
-    EntryTime = erlang:system_time(),
-    State1 = State#{'_entry_time' => EntryTime,
-                    '_pid' =>self(), '_status' => running},
-    enter_(State1).
-
-enter_(#{'_entry' := Entry} = State) ->
+enter(#{'_entry' := Entry} = State) ->
     %% fun exit/1 must be called even initialization not successful.
     try Entry(State) of
         {ok, S} ->
             {ok, S};
         {stop, Reason, S} ->
-            {stop, leave(S, Reason)}
+            {stop, leave(S#{'_reason' => Reason})}
     catch
         C:E ->
             ErrState = State#{'_status' => exception},
-            {stop, leave(ErrState, {C, E})}
+            {stop, leave(ErrState#{'_reason' => {C, E}})}
     end;
-enter_(State) ->
+enter(State) ->
     {ok, State}.
+
+%%--------------------------------------------------------------------
+%% Initialize and launch FSM.
+%% Flag of FSM is the attribute named '_state' existed.
+%% Specially, '_state' and '_states' data should be initialized by loader.
+%% Initialization operation is for data load from persistent store.
+%%--------------------------------------------------------------------
+%% state type is FSM, initilize it.
+init_fsm(#{'_state' := State} = Fsm) ->
+    process_flag(trap_exit, true),
+    Step = maps:get(<<"_step">>, Fsm, 0),
+    Traces = maps:get(<<"_traces">>, Fsm, []),
+    MaxTraces = maps:get(<<"_max_traces">>, Fsm, ?MAX_TRACES),
+    Fsm1 = Fsm#{'_step' => Step,
+                  '_traces' => Traces,
+                  '_max_traces' => MaxTraces},
+    start_fsm(State, Fsm1);
+init_fsm(State) ->
+    {ok, State}.
+
+%% Import external actor as FSM state.
+start_fsm(Pid, Fsm) when is_pid(Pid) ->
+    {ok, Fsm};
+%% State is out of FSM states set.
+start_fsm(#{} = State, Fsm) ->
+    {ok, Pid} = start_link(State#{'_fsm' => self()}),
+    {ok, Fsm#{'_state' := Pid}};
+start_fsm(Sign, #{'_states' := States} = Fsm) ->
+    State = next_state(Sign, States),
+    {ok, Pid} = start_link(State#{'_fsm' => self()}),
+    {ok, Fsm#{'_state' := Pid}}.
+
+%%--------------------------------------------------------------------
+%% There is a graph structure in states set.
+%%
+%% Sign must not be tuple type. Data in map should be {From, Sign} := To.
+%% The first level states is wildcard, Sign for any From.
+%%--------------------------------------------------------------------
+next(#{<<"_name">> := Name}, Sign, States) ->
+    next_state({Name, Sign}, States);
+next(Name, Sign, States) ->
+    next_state({Name, Sign}, States).
+
+next_state(State, _) when is_map(State) ->
+    State;
+next_state(Sign, States) when is_function(States) ->
+    States(Sign);
+next_state(Sign, States) ->
+    case maps:find(Sign, States) of
+        {ok, State} ->
+            State;
+        error ->
+            {_From, Next} = Sign,
+            maps:get(Next, States)
+    end.
 
 %%--------------------------------------------------------------------
 %% Handling messages by relay to react function.
@@ -256,15 +315,10 @@ normalize_msg({xlx, {Pid, _} = From, Path, subscribe}) ->
 %% gen_server timeout as hibernate command.
 normalize_msg(tiemout) ->
     {xlx, hibernate};
-normalize_msg(Msg) ->
+ normalize_msg(Msg) ->
     Msg.
 
 
-%% do activity can be asyn version of entry to initialize the state.
-%% If there is no do activity, actions in react can be dynamic version of do.
-%% '_xlx_do_activity' must be the first message handled by gen_server.
-handle('_xlx_do_activity', State) ->
-    do_activity(State);
 handle(Info, #{'_react' := React} = State) ->
     try
         React(Info, State)
@@ -282,7 +336,7 @@ handle_1(Info, {ok, unhandled, State}) ->
 handle_1(_Info, Res) ->
     Res.
 
-%% stop or hibernate may be canceled by state react with code error.
+%% Stop or hibernate may be canceled by state react with code error.
 handle_2({xlx, {stop, Reason}}, {ok, State}) ->
     {stop, Reason, State};
 handle_2({xlx, {stop, Reason}}, {ok, _, State}) ->
@@ -328,6 +382,9 @@ handle_3(Result) ->
 %%--------------------------------------------------------------------
 %% Default message handler called when message is 'unhandled' by react function.
 %%--------------------------------------------------------------------
+%% State transition message. From is state data or name.
+default_react({xlx_leave, Vector}, Fsm) ->
+    transfer(Fsm, Vector);
 default_react({xlx, Info}, State) ->
     recast(Info, State);
 default_react({xlx, _From, [], Command}, State) ->
@@ -337,9 +394,13 @@ default_react({xlx, From, Path, Command}, State) ->
 default_react({'DOWN', M, process, _, _}, #{'_subscribers' := Subs} = S) ->
     Subs1 = maps:remove(M, Subs),
     {ok, S#{'_subscribers' := Subs1}};  % todo: DOWN for links
-%% Gracefully leave state when receive unhandled EXIT signal.
-default_react({'EXIT', _, _} = Kill, State) ->
-    {stop, Kill, State};  % todo: handler for 'EXIT'
+default_react({'EXIT', _, Reason} = Exit, Fsm) ->
+    case maps:find('_state', #{'_status' := Status} = Fsm) of
+        {ok, _} when Status =:= running ->
+            transfer(Fsm#{'_reason' => Reason}, exception);
+        _Unexpected ->
+            {stop, Exit, Fsm}
+    end;
 default_react(_Info, State) ->
     {ok, State}.
 
@@ -397,6 +458,72 @@ recast({unsubscribe, _} = Unsub, State) ->
     {ok, NewState};
 recast(_Info, State) ->
     {ok, State}.
+
+%%--------------------------------------------------------------------
+%% FSM state transition functions.
+%%--------------------------------------------------------------------
+transfer(Fsm, #{'_sign' := Sign} = State) ->
+    transfer(Fsm, State, Sign);
+transfer(Fsm, {From, To}) ->
+    transfer(Fsm, From, To);
+transfer(Fsm, To) ->
+    transfer(Fsm, undefined, To).
+
+transfer(#{'_step' := Step} = Fsm, From, To) ->
+    Fsm1 = archive(Fsm, {From, To}),
+    Res = case maps:find(<<"_max_steps">>, Fsm1) of
+              {ok, MaxSteps} when Step >= MaxSteps ->
+                  t1(Fsm1#{'_reason' => out_of_steps}, From, exception);
+              _ ->
+                  t1(Fsm1#{'_step' := Step + 1}, From, To)
+          end,
+    t2(Res, From, To).
+
+t1(#{'_states' := States} = Fsm, From, To) ->
+    %% You can provide your own cutomized exception and stop state.
+    try next(From, To, States) of
+        stop ->
+            {stop, normal, Fsm};
+        Next ->
+            {ok, Pid} = start_link(Next#{'_fsm' => self()}),
+            {ok, Fsm#{'_state' := Pid}}
+    catch
+        error: _BadKey when To =:= exception ->
+            {stop, exception, Fsm};
+        error: _BadKey when To =:= ok ->
+            {stop, normal, Fsm};
+        error: _BadKey when To =:= stop ->
+            {stop, normal, Fsm};
+        error: _BadKey when To =:= stopped ->
+            {stop, normal, Fsm};
+        error: _BadKey ->  % try exception handler.
+            t1(Fsm, From, exception)
+    end;
+t1(Fsm, _From, _To) ->  % no states set, halt.
+    {stop, no_more_state, Fsm}.
+
+t2({stop, Reason, #{'_state' := Pid} = Fsm}, State, Sign) ->
+    unlink(Pid),
+    Fsm1 = Fsm#{'_status' := stopping, '_state' := State, '_sign' => Sign},
+    {stop, Reason, Fsm1};
+t2(Ok, _State, _Sign) ->
+    Ok.
+
+%% Trace is a vector of form {From, To}
+archive(#{'_traces' := Traces} = Fsm, Trace) when is_function(Traces) ->
+    Traces(Fsm, Trace);
+archive(#{'_traces' := Traces, '_max_traces' := Limit} = Fsm, Trace)  ->
+    Traces1 = enqueue(Trace, Traces, Limit),
+    Fsm#{'_traces' => Traces1};
+archive(Fsm, _Trace) ->
+    Fsm.
+
+enqueue(_Item, _Queue, 0) ->
+    [];
+enqueue(Item, Queue, infinity) ->
+    [Item | Queue];
+enqueue(Item, Queue, Limit) ->
+    lists:sublist([Item | Queue], Limit).
 
 %%--------------------------------------------------------------------
 %% Process messages with path, when react function does not handle it.
@@ -462,22 +589,6 @@ invoke2(_Unknown, _, _) ->
     {error, unknown}.
 
 %%--------------------------------------------------------------------
-%% Time-consuming activity in two mode: sync or async.
-%% async mode is perfered.
-%%--------------------------------------------------------------------
-do_activity(#{'_do' := Do} = State) when is_function(Do) ->
-    %% Block gen_server work loop, 
-    %% mention the timeout of gen_server response.
-    try
-        Do(State)
-    catch
-        C:E ->
-            {stop, {C, E}, State#{'_status' => exception}}
-    end;
-do_activity(State) ->
-    {ok, State}.
-
-%%--------------------------------------------------------------------
 %% This function is called by a gen_server when it is about to
 %% terminate. It should be the opposite of Module:init/1 and do any
 %% necessary cleaning up. When it returns, the gen_server terminates
@@ -486,33 +597,56 @@ do_activity(State) ->
 %%--------------------------------------------------------------------
 -spec terminate(reason(), state()) -> no_return().
 terminate(Reason, State) ->
-    erlang:exit(leave(State, Reason)).
+    FinalState = stop_fsm(State, Reason),
+    %% leave is reused by init function for uninitialization.
+    leave(FinalState).
 
-leave(State, xlx_unload) ->  % unload command do not call exit action.
-    Final = final_notify(State, unload),
-    %% notice: please remove subscribers when persistent in database.
-    {unloaded, Final};
-leave(State, Reason) ->
-    {Sign, Sexit} = try_exit(State#{'_reason' => Reason}),
-    Sfinal = Sexit#{'_exit_time' => erlang:system_time()},
-    Output = maps:get('_io', Sfinal, undefined),
-    FinalState = final_notify(Sfinal, {stop, {Sign, Output}}),
-    case maps:find('_status', FinalState) of
-        {ok, Status} when Status =/= running ->
-            {Sign, FinalState};
-        _ ->  % running or undefined
-            {Sign, FinalState#{'_status' := stopped}}
-    end.
+leave(State) ->
+    {Sign, State1} = try_exit(State),
+    State2 = State1#{'_exit_time' => erlang:system_time(),
+                     '_status' := stopped},
+    Vector = case maps:find(<<"_name">>, State2) of
+                 {ok, Name} ->
+                     {Name, Sign};
+                 error ->
+                     Sign
+             end,
+    FinalState = notify_all(State2, {leave, Vector}),
+    notify_fsm(FinalState, Sign).
 
-final_notify(#{'_subscribers' := Subs} = State, Info) ->
+notify_all(#{'_subscribers' := Subs} = State, Info) ->
     maps:fold(fun(Mref, Pid, Acc) ->
                       catch Pid ! {Mref, Info},
                       demonitor(Mref),
                       Acc
               end, 0, Subs),
     maps:remove('_subscribers', State);
-final_notify(State, _) ->
+notify_all(State, _) ->
     State.
+
+notify_fsm(#{'_fsm' := Fsm} = State, Sign) ->
+    case is_process_alive(Fsm) of
+        true ->
+            Fsm ! {xlx_leave, {State, Sign}},
+            flush_and_relay(Fsm),
+            normal;
+        false ->
+            normal
+    end.
+
+%% flush system messages and reply application messages.
+flush_and_relay(Pid) ->
+    receive
+        {'DOWN', _, _, _, _} ->
+            flush_and_relay(Pid);
+        {'EXIT', _, _} ->
+            flush_and_relay(Pid);
+        Message ->
+            Pid ! Message,
+            flush_and_relay(Pid)
+    after 0 ->
+            true
+    end.
 
 %% Mind the priority of sign extracting.
 try_exit(#{'_exit' := Exit} = State) ->
@@ -529,6 +663,18 @@ try_exit(#{'_sign' := Sign} = State) ->
 try_exit(State) ->
     {stopped, State}.
 
+stop_fsm(#{'_status' := stopping} = Fsm, _Reason) ->
+    Fsm;
+stop_fsm(#{'_state' := Pid} = Fsm, Reason) ->
+    case is_process_alive(Pid) of
+        true ->
+            Timeout = maps:get(<<"_timeout">>, Fsm,  ?DFL_TIMEOUT),
+            {stopped, {Final, Sign}} = stop(Pid, Reason, Timeout),
+            Fsm#{'_state' := Final, '_sign' => Sign, '_reason' => Reason};
+        false ->
+            Fsm
+    end.
+    
 %%--------------------------------------------------------------------
 %% Convert process state when code is changed
 %%--------------------------------------------------------------------
@@ -588,23 +734,18 @@ stop(Process, Reason) ->
 -spec stop(process(), reason(), timeout()) -> output().
 stop(Process, Reason, Timeout) ->
     Mref = monitor(process, Process),
-    cast(Process, {stop, Reason}),
+    cast(Process, {stopped, Reason}),
     receive
+        {xlx_leave, Result} ->
+            demonitor(Mref, [flush]),
+            {stopped, Result};
         {'DOWN', Mref, _, _, Result} ->
-            Result
+            {'EXIT', Result}
     after
         Timeout ->
             demonitor(Mref, [flush]),
             erlang:exit(timeout)
     end.
-
-%% Unload context data from engine.
--spec unload(process()) -> {'unloaded', state()} | term().
-unload(Process) ->
-    stop(Process, xlx_unload, ?DFL_TIMEOUT).
--spec unload(process(), timeout()) -> {'unloaded', state()} | term().
-unload(Process, Timeout) ->
-    stop(Process, xlx_unload, Timeout).
 
 -spec subscribe(process()) -> {'ok', reference()}.
 subscribe(Process) ->
