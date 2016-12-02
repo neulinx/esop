@@ -2,11 +2,11 @@
 %%% @author Gary Hai <gary@XL59.com>
 %%% @copyright (C) 2016, Neulinx Platforms.
 %%% @doc
-%%%  State object with gen_server behaviours.
+%%%  Trinitiy of State, FSM, Actor, with gen_server behaviours.
 %%% @end
 %%% Created : 27 Apr 2016 by Gary Hai <gary@XL59.com>
 %%%-------------------------------------------------------------------
--module(xl_state).
+-module(xl_actor).
 
 -ifdef(TEST).
     -include_lib("eunit/include/eunit.hrl").
@@ -49,6 +49,9 @@
 -type start_opt() ::
         {'timeout', Time :: timeout()} |
         {'spawn_opt', [proc_lib:spawn_option()]}.
+%% @todo write document for state/FSM/actor attributes.
+%% - Runtime attributes names is atom type with prefix '_'.
+%% - Raw data (json => map) should not contain atom type or tuple type data. 
 -type state() :: #{
 %%---------- state base attributes --------
              '_entry' => entry(),
@@ -64,7 +67,9 @@
              '_state' => pid() | state() | term(),
              '_states' => map() | function(),
              '_fsm' => pid(),
-             '_step' => non_neg_integer()
+             '_step' => non_neg_integer(),
+%%---------- Actor attributes --------
+             '_links' => map() | pid() | function()
 %%---------- Customized attributes --------
 %             <<"_max_steps">> => limit(),
 %             <<"_recovery">> => recovery(),
@@ -72,6 +77,7 @@
 %             <<"_retry_count">> => non_neg_integer(),
 %             <<"_retry_interval">> => non_neg_integer()
 %             <<"_name">> => name(),
+%             <<"_links">> => map(),
 %             <<"behavior">> => behavior(),
 %             <<"_timeout">> => timeout(),  % default: 5000
 %             <<"_hibernate">> => timeout()  % mandatory, default: infinity
@@ -192,12 +198,26 @@ create(Module, Data) when is_list(Data) ->
 %% gen_server callback. Initializes the server with state action entry.
 %%--------------------------------------------------------------------
 -spec init(state()) -> {'ok', state()} | {'stop', output()}.
-init(#{'_status' := running} = State) ->  % resume suspended state.
+init(State) ->
+    process_flag(trap_exit, true),
+    init_state(State).
+
+init_state(#{'_status' := running} = State) ->  % resume suspended state.
     cast(self(), xlx_wakeup),  % notify to prepare state resume.
     {ok, State#{'_pid' => self()}};
-init(State) ->
+init_state(State) ->
+    Monitors = maps:get('_monitors', State, #{}),
+    %% '_links' should be initilized by loader.
+    Links = maps:get('_links', State, #{}),
+    Boundary = maps:get(<<"_boundary">>, State, closed),
+    Timeout = maps:get(<<"_timeout">>, State, ?DFL_TIMEOUT),
     State1 = State#{'_entry_time' => erlang:system_time(),
-                    '_pid' =>self(), '_status' => running},
+                    '_monitors' => Monitors,
+                    '_links' => Links,
+                    '_boundary' => Boundary,
+                    '_timeout' => Timeout,
+                    '_pid' =>self(),
+                    '_status' => running},
     case enter(State1) of
         {ok, State2} ->
             init_fsm(State2);
@@ -228,7 +248,6 @@ enter(State) ->
 %%--------------------------------------------------------------------
 %% state type is FSM, initilize it.
 init_fsm(#{'_state' := State} = Fsm) ->
-    process_flag(trap_exit, true),
     Step = maps:get(<<"_step">>, Fsm, 0),
     Traces = maps:get(<<"_traces">>, Fsm, []),
     MaxTraces = maps:get(<<"_max_traces">>, Fsm, ?MAX_TRACES),
@@ -315,7 +334,7 @@ normalize_msg({xlx, {Pid, _} = From, Path, subscribe}) ->
 %% gen_server timeout as hibernate command.
 normalize_msg(tiemout) ->
     {xlx, hibernate};
- normalize_msg(Msg) ->
+normalize_msg(Msg) ->
     Msg.
 
 
@@ -770,67 +789,134 @@ notify(Process, Tag, Info) ->
 %%--------------------------------------------------------------------
 %% Helper functions for active attribute access.
 %%--------------------------------------------------------------------
--spec get(key(), state()) -> {'ok', Value :: term(), state()} |
-                             {'error', 'not_found', state()}.
+%% return: {ok, term(), state()} | {error, term(), state()}.
+%% request of 'get' is default to fetch all data (without internal attributes).
 get(Key, State) ->
-    case maps:find(Key, State) of
-        {ok, Pid} when is_pid(Pid) ->
-            {ok, Pid, State};
-        {ok, {Pid, _}} when is_pid(Pid) ->
-            {ok, Pid, State};
-        {ok, V} ->
-            active(Key, V, State);
-        _ ->
-            try_link(Key, State)
+    case activate(Key, State) of
+        {data, Data, State1} ->
+            {ok, Data, State1};
+        {pid, Pid, #{'_timeout' := Timeout} = State1} ->
+            {Sign, Result} = call(Pid, get, Timeout),
+            {Sign, Result, State1};
+        Error ->
+            Error
     end.
 
--spec active(key(), Value, state()) -> {'ok', Value, state()}
-                                           when Value :: term().
-active(K, #{<<"_behavior">> := <<"state">>} = V, S) ->
-    active_(K, V, S);
-active(K, #{<<"_behavior">> := state} = V, S) ->
-    active_(K, V, S);
-active(K, #{<<"_behavior">> := Module} = V, S) when is_binary(Module) ->
-    M = binary_to_existing_atom(Module, utf8),
-    V1 = xl_state:create(M, V),
-    active_(K, V1, S);
-active(K, #{<<"_behavior">> := Module} = V, S) ->
-    V1 = xl_state:create(Module, V),  % assert Module type is atom.
-    active_(K, V1, S);
-active(_K, V, S) ->
-    {ok, V, S}.
+-spec activate(key(), state()) -> {pid, pid(), state()} |
+                                  {data, term(), state()} |
+                                  {error, term(), state()}.
+activate(Key, State) ->
+    case maps:find(Key, State) of
+        {ok, {link, _, Pid}} ->
+            {pid, Pid, State};
+        {ok, #{'_actions' := Actions} = Value} ->
+            activate(Actions, Key, Value, State);
+        {ok, Value} ->
+            {data, Value, State};
+        error ->  % not found, try to activate data in '_links'.
+            attach(Key, State)
+    end.
 
-active_(K, V, S) ->
-    M = maps:get('_monitors', S, #{}),
-    {ok, Pid} = xl_state:start_link(V),
-    Monitors = M#{Pid => K},
-    {ok, Pid, S#{K => Pid, '_monitors' => Monitors}}.
+%% Value must be map type. Spawn state machine and link it as active attribute.
+activate(Key, Value, #{'_monitors' := M} = State) ->
+    {ok, Pid} = xl_state:start_link(Value),
+    Monitors = M#{Pid => Key},
+    {pid, Pid, State#{Key => {link, local, Pid}, '_monitors' := Monitors}}.
 
-try_link(Key, #{<<"_id">> := Id, '_global' := R} = State) ->
-    case call(R, {get, {Id, Key}, active}) of
-        {ok, Pid} ->
-            M = maps:get('_monitors', State, #{}),
+%% Intermediate function to bind behaviors with state.
+activate(state, Key, Value, State) ->
+    activate(Key, Value, State);
+activate(Module, Key, Value, State) when is_atom(Module) ->
+    Value1 = create(Module, Value),
+    activate(Key, Value1, State);
+activate(Module, Key, Value, State) when is_binary(Module) ->
+    Module1 = binary_to_existing_atom(Module, utf8),
+    activate(Module1, Key, Value, State);
+%% Actions is map type with state behaviors: #{'_entry', '_react', '_exit'}.
+activate(Actions, Key, Value, State) when is_map(Actions) ->
+    Value1 = maps:merge(Value, Actions),
+    activate(Key, Value1, State);
+activate(_Unknown, _Key, _Value, State) ->    
+    {error, unknown, State}.
+
+%% Try to retrieve data or external actor,
+%%  and attach to attribute of current actor.
+attach(Key, #{'_links' := Links} = State) ->
+    case fetch_link(Key, Links, State) of
+        %% external actor.
+        {pid, Pid, #{'_monitors' := M} = S} ->
             Mref = monitor(process, Pid),
             M1 = M#{Mref => Key},
-            {ok, Pid, State#{Key => {Pid, Mref}, '_monitors' => M1}};
-        {error, Error} ->
-            {error, Error, State}
-    end;
-try_link(_Key, State) ->
-    {error, not_found, State}.
+            {pid, Pid, S#{Key => {link, Mref, Pid}, '_monitors' := M1}};
+        %% state data to spawn link local child actor.
+        {state, Data, S} ->
+            Actions = maps:get('_actions', Data, state),
+            activate(Actions, Key, Data, S);
+        %% data only, copy it as initial value.
+        {data, Data, S} ->
+            {data, Data, S#{Key => Data}};
+        Error ->
+            Error
+    end.
 
-
+%% Links function type:
+%% -spec link_fun(key(), state()) -> {pid, pid(), state()} |
+%%                                   {state, state(), state()} |
+%%                                   {data, term(), state()} |
+%%                                   {error, term(), state()}.
+fetch_link(Key, Links, State) when is_function(Links) ->
+    Links(Key, State);
+%% Links pid type response:
+%% {pid, pid()} | {state, state()} | {data, term()} | {error, term()}.
+fetch_link(Key, Links, #{'_timeout' := Timeout} = State) when is_pid(Links) ->
+    {Sign, Result} = call(Links, {ref, Key}, Timeout),
+    {Sign, Result, State};
+%% Links map type format:
+%% {ref, Pid, Id} | {ref, Key, Id} | {state, Map} | Data
+%% return: {pid, pid(), state()} | {state, state(), state()}
+%%     | {data, term(), state()} | {error, term(), state()}.
+fetch_link(Key, Links, #{'_timeout' := Timeout} = State) ->
+    case maps:find(Key, Links) of
+        error ->
+            {error, not_found, State};
+        %% pid of registry actor directly.
+        {ok, {ref, Registry, Id}} when is_pid(Registry) ->
+            {Sign, Result} = call(Registry, {ref, Id}, Timeout),
+            {Sign, Result, State};
+        %% attribute name as registry.
+        {ok, {ref, RegName, Id}} ->
+            case activate(RegName, State) of
+                {pid, Registry, State1} ->
+                    {Sign, Result} = call(Registry, {ref, Id}, Timeout),
+                    {Sign, Result, State1};
+                {data, Data, State1} when Id =/= undefined ->
+                    Value = maps:get(Id, Data),
+                    {data, Value, State1};
+                %% when Id is undefined, return {data, Data, State1}.
+                %% Same case as Error :: {error, term()}.
+                Error ->
+                    Error
+            end;
+        %% Explicit state data to spawn actor.
+        {ok, {state, Data}} ->
+            {state, Data, State};
+        {ok, Data} ->
+            {data, Data, State}
+    end.
 
 -spec put(key(), Value, state()) -> {'ok', Value, state()}
                                         when Value :: term().
 put(Key, Value, State) ->
-    case maps:find(Key, State) of
-        {ok, V} when is_pid(V) ->
-            {ok, S1} = delete(Key, State),
-            active(Key, Value, S1);
-        _ ->
-            active(Key, Value, State)
+    case activate(Key, State) of
+        {pid, Pid, #{'_timeout' := Timeout} = State1} ->
+            {Sign, Result} = call(Pid, {put, Value}, Timeout),
+            {Sign, Result, State1};
+        {data, _, State1} ->
+            {ok, updated, State1#{Key => Value}};
+        Error ->
+            Error
     end.
+  
 
 -spec delete(key(), state()) -> {'ok', state()} |
                                 {'error', 'not_found', state()}.
