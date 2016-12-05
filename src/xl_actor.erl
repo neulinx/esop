@@ -429,7 +429,7 @@ recall({get, Key}, State) ->
 recall({get, Key, raw}, State) ->
     case maps:find(Key, State) of
         error ->
-            {error, not_found, State};
+            {error, undefined, State};
         {ok, Value} ->
             {ok, Value, State}
     end;
@@ -561,7 +561,7 @@ traverse(From, [Key | Path], Command, State) ->
         {ok, Package, NewS} ->
             case invoke(Command, Key, Path, Package, NewS) of
                 error ->
-                    {error, not_found, NewS};
+                    {error, undefined, NewS};
                 {dirty, DirtyS} ->
                     {ok, DirtyS};
                 {Code, Value} ->
@@ -789,22 +789,13 @@ notify(Process, Tag, Info) ->
 %%--------------------------------------------------------------------
 %% Helper functions for active attribute access.
 %%--------------------------------------------------------------------
-%% return: {ok, term(), state()} | {error, term(), state()}.
-%% request of 'get' is default to fetch all data (without internal attributes).
-get(Key, State) ->
-    case activate(Key, State) of
-        {data, Data, State1} ->
-            {ok, Data, State1};
-        {pid, Pid, #{'_timeout' := Timeout} = State1} ->
-            {Sign, Result} = call(Pid, get, Timeout),
-            {Sign, Result, State1};
-        Error ->
-            Error
-    end.
-
 -spec activate(key(), state()) -> {pid, pid(), state()} |
                                   {data, term(), state()} |
                                   {error, term(), state()}.
+%% Raw data types of attributes:
+%% {link, local, pid()} | {link, ref(), pid()} |
+%%  #{'_actions' := actions()} | term().
+%% when actions() :: state | module() | Module :: binary() | Actions :: map().
 activate(Key, State) ->
     case maps:find(Key, State) of
         {ok, {link, _, Pid}} ->
@@ -878,7 +869,7 @@ fetch_link(Key, Links, #{'_timeout' := Timeout} = State) when is_pid(Links) ->
 fetch_link(Key, Links, #{'_timeout' := Timeout} = State) ->
     case maps:find(Key, Links) of
         error ->
-            {error, not_found, State};
+            {error, undefined, State};
         %% pid of registry actor directly.
         {ok, {ref, Registry, Id}} when is_pid(Registry) ->
             {Sign, Result} = call(Registry, {ref, Id}, Timeout),
@@ -904,23 +895,75 @@ fetch_link(Key, Links, #{'_timeout' := Timeout} = State) ->
             {data, Data, State}
     end.
 
--spec put(key(), Value, state()) -> {'ok', Value, state()}
-                                        when Value :: term().
+%%--------------------------------------------------------------------
+%% Helper functions for data access.
+%% if raw data 
+%%--------------------------------------------------------------------
+%% return: {ok, term(), state()} | {error, term(), state()}.
+%% request of 'get' is default to fetch all data (without internal attributes).
+get(Key, State) ->
+    case activate(Key, State) of
+        {data, Data, State1} ->
+            {ok, Data, State1};
+        {pid, Pid, #{'_timeout' := Timeout} = State1} ->
+            {Sign, Result} = call(Pid, get, Timeout),
+            {Sign, Result, State1};
+        Error ->
+            Error
+    end.
+
+get_raw(Key, State) ->
+    case maps:find(Key, State) of
+        {ok, Value} ->
+            {ok, Value, State};
+        error ->
+            {error, undefined, State}
+    end.
+
+%% -spec put(key(), Value, state()) -> {'ok', Value, state()}
+%%                                         when Value :: term().
 put(Key, Value, State) ->
     case activate(Key, State) of
         {pid, Pid, #{'_timeout' := Timeout} = State1} ->
             {Sign, Result} = call(Pid, {put, Value}, Timeout),
             {Sign, Result, State1};
         {data, _, State1} ->
-            {ok, updated, State1#{Key => Value}};
+            {ok, update, State1#{Key => Value}};
         Error ->
             Error
     end.
-  
 
+put_raw(Key, Value, #{'_monitors' := M} = State) ->
+    S = case maps:find(Key, State) of
+            {ok, {link, local, Pid}} ->
+                unlink(Pid),
+                M1 = maps:remove(Pid, M),
+                cast(Pid, {stop, update}),
+                State#{Key := Value, '_monitors' := M1};
+            {ok, {link, Monitor, _}} ->
+                demonitor(Monitor),
+                M1 = maps:remove(Monitor, M),
+                State#{Key := Value, '_monitors' := M1};
+            {ok, _} ->
+                State#{Key := Value};
+            error ->
+                State#{Key => Value}
+        end,
+    {ok, update, S}.
+
+%%%%%%%%
 -spec delete(key(), state()) -> {'ok', state()} |
-                                {'error', 'not_found', state()}.
+                                {'error', 'undefined', state()}.
 delete(Key, #{'_monitors' := M} = State) ->
+    case activate(Key, State) of
+        {pid, Pid, #{'_timeout' := Timeout} = State1} ->
+            {Sign, Result} = call(Pid, {put, Value}, Timeout),
+            {Sign, Result, State1};
+        {data, _, State1} ->
+            {ok, delete, State1#{Key => Value}};
+        Error ->
+            Error
+    end.
     case maps:find(Key, State) of
         {ok, V} when is_pid(V) ->
             erlang:unlink(V),
