@@ -57,15 +57,15 @@
              '_react' => react(),
              '_exit' => exit(),
              '_pid' => pid(),
+             '_parent' => pid(),
              '_reason' => reason(),
              '_status' => status(),
              '_subscribers' => map(),
              '_entry_time' => pos_integer(),
              '_exit_time' => pos_integer(),
 %%---------- FSM attributes --------
-             '_state' => pid() | state() | term(),
-             '_states' => map() | function(),
-             '_fsm' => pid(),
+             '_state' => active_attribute() | state() | term(),
+             '_states' => map() | function() | active_attribute(),
              '_step' => non_neg_integer(),
 %%---------- Actor attributes --------
              '_links' => map() | pid() | function()
@@ -82,8 +82,8 @@
 %             <<"_hibernate">> => timeout()  % mandatory, default: infinity
             } | map().
 
+-type active_attribute() :: {'link', process(), 'local' | reference()}.
 -type key() :: atom() | string() | binary().
-
 -type tag() :: 'xlx'.
 -type path() :: [key()].
 -type request() :: {tag(), from(), Command :: term()} |
@@ -208,33 +208,27 @@ init_state(State) ->
     Monitors = maps:get('_monitors', State, #{}),
     %% '_links' should be initilized by loader.
     Links = maps:get('_links', State, #{}),
-    Boundary = maps:get(<<"_boundary">>, State, closed),
     Timeout = maps:get(<<"_timeout">>, State, ?DFL_TIMEOUT),
     State1 = State#{'_entry_time' => erlang:system_time(),
                     '_monitors' => Monitors,
                     '_links' => Links,
-                    '_boundary' => Boundary,
                     '_timeout' => Timeout,
                     '_pid' =>self(),
                     '_status' => running},
     case enter(State1) of
         {ok, State2} ->
-            init_fsm(State2);
+            {ok, init_fsm(State2)};
         Stop ->
             Stop
     end.
 
+%% entry function not support timeout or hibernate if this is a FSM.
 enter(#{'_entry' := Entry} = State) ->
-    %% fun exit/1 must be called even initialization not successful.
-    try Entry(State) of
-        {ok, S} ->
-            {ok, S};
-        {stop, Reason, S} ->
-            {stop, leave(S#{'_reason' => Reason})}
-    catch
-        C:E ->
-            ErrState = State#{'_status' => exception},
-            {stop, leave(ErrState#{'_reason' => {C, E}})}
+    case Entry(State) of
+        {stop, Reason, _S} ->
+            {stop, Reason};
+        Ok ->
+            Ok
     end;
 enter(State) ->
     {ok, State}.
@@ -246,28 +240,26 @@ enter(State) ->
 %% Initialization operation is for data load from persistent store.
 %%--------------------------------------------------------------------
 %% state type is FSM, initilize it.
-init_fsm(#{'_state' := State} = Fsm) ->
+init_fsm(#{'_state' := _} = Fsm) ->
     Step = maps:get(<<"_step">>, Fsm, 0),
     Traces = maps:get(<<"_traces">>, Fsm, []),
     MaxTraces = maps:get(<<"_max_traces">>, Fsm, ?MAX_TRACES),
     Fsm1 = Fsm#{'_step' => Step,
-                  '_traces' => Traces,
-                  '_max_traces' => MaxTraces},
-    start_fsm(State, Fsm1);
+                '_traces' => Traces,
+                '_max_traces' => MaxTraces},
+    start_fsm(Fsm1);
 init_fsm(State) ->
-    {ok, State}.
+    State.
 
 %% Import external actor as FSM state.
-start_fsm(Pid, Fsm) when is_pid(Pid) ->
-    {ok, Fsm};
-%% State is out of FSM states set.
-start_fsm(#{} = State, Fsm) ->
-    {ok, Pid} = start_link(State#{'_fsm' => self()}),
-    {ok, Fsm#{'_state' := Pid}};
-start_fsm(Sign, #{'_states' := States} = Fsm) ->
-    State = next_state(Sign, States),
-    {ok, Pid} = start_link(State#{'_fsm' => self()}),
-    {ok, Fsm#{'_state' := Pid}}.
+start_fsm(Fsm) ->
+    case activate('_state', Fsm) of
+        {pid, _, Fsm1} ->
+            Fsm1;
+        {data, Start, #{'_states' := States} = Fsm1} ->
+            State = next_state(Start, States),
+            start_fsm(Fsm1#{'_state' := {state, State}})
+    end.
 
 %%--------------------------------------------------------------------
 %% There is a graph structure in states set.
@@ -458,9 +450,9 @@ recall({subscribe, Pid}, State) ->
     Subs1 = Subs#{Mref => Pid},
     {ok, Mref, State#{'_subscribers' => Subs1}};
 recall({unsubscribe, Mref}, #{'_subscribers' := Subs} = State) ->
-    demonitor(Mref),
+    demonitor(Mref, [flush]),
     Subs1 = maps:remove(Mref, Subs),
-    {ok, State#{'_subscribers' := Subs1}};
+    {ok, done, State#{'_subscribers' := Subs1}};
 recall(_, State) ->
     {error, unknown, State}.
 
@@ -471,7 +463,7 @@ recast({notify, Info}, #{'_subscribers' := Subs} = State) ->
               end, 0, Subs),
     {ok, State};
 recast({unsubscribe, _} = Unsub, State) ->
-    {_, NewState} = recall(Unsub, State),
+    {ok, done, NewState} = recall(Unsub, State),
     {ok, NewState};
 recast(_Info, State) ->
     {ok, State}.
@@ -502,8 +494,9 @@ t1(#{'_states' := States} = Fsm, From, To) ->
         stop ->
             {stop, normal, Fsm};
         Next ->
-            {ok, Pid} = start_link(Next#{'_fsm' => self()}),
-            {ok, Fsm#{'_state' := Pid}}
+            F = unlink('_state', Fsm),
+            {pid, _, F1} = activate(undefined, '_state', Next, F),
+            {ok, F1}
     catch
         error: _BadKey when To =:= exception ->
             {stop, exception, Fsm};
@@ -519,11 +512,11 @@ t1(#{'_states' := States} = Fsm, From, To) ->
 t1(Fsm, _From, _To) ->  % no states set, halt.
     {stop, no_more_state, Fsm}.
 
-t2({stop, Reason, #{'_state' := Pid} = Fsm}, State, Sign) ->
-    unlink(Pid),
+t2({stop, Reason, Fsm}, State, Sign) ->
+    {ok, done, F} = put('_state', {state, State}, Fsm),
 % todo: remove from monitors.
-    Fsm1 = Fsm#{'_status' := stopping, '_state' := State, '_sign' => Sign},
-    {stop, Reason, Fsm1};
+    F1 = F#{'_status' := stopping, '_sign' => Sign},
+    {stop, Reason, F1};
 t2(Ok, _State, _Sign) ->
     Ok.
 
@@ -553,58 +546,47 @@ traverse(_, [Key], {put, Value}, State) ->
 traverse(_, [Key], delete, State) ->
     recall({delete, Key}, State);
 traverse(From, [Key | Path], Command, State) ->
-    case get(Key, State) of
-        {ok, Pid, NewS} when is_pid(Pid) ->
+    case activate(Key, State) of
+        {pid, Pid, S} ->
             Pid ! {xlx, From, Path, Command},
-            {ok, NewS};
-        {ok, Package, NewS} ->
-            case invoke(Command, Key, Path, Package, NewS) of
+            {ok, S};
+        {data, Package, S} ->  % Assert Path not [].
+            case iterate(Command, Path, Package) of
                 error ->
-                    {error, undefined, NewS};
-                {dirty, DirtyS} ->
-                    {ok, DirtyS};
-                {Code, Value} ->
-                    {Code, Value, NewS}
+                    {error, undefined, S};
+                {dirty, Data} ->
+                    {ok, done, S#{Key => Data}};
+                {Code, Value} ->  % {ok, Value} | {error, Error}.
+                    {Code, Value, S}
             end;
         Error ->
             Error
     end.
 
-invoke(Command, Key, [], Data, Container) ->
-    invoke1(Command, Key, Data, Container);
-invoke(Command, Key, [Next | Path], Branch, Container) ->
-    case invoke0(Command, Next, Path, Branch) of
-        {dirty, NewBranch} ->
-            {dirty, Container#{Key := NewBranch}};
-        NotChange ->
-            NotChange
-    end.
-
-invoke0(Command, Key, [], Container) ->
-    invoke2(Command, Key, Container);
-invoke0(Command, Key, Path, Container) ->
-    case maps:find(Key, Container) of
-        {ok, Value} ->
-            invoke(Command, Key, Path, Value, Container);
-        error ->
-            error
-    end.
-
-invoke1(get, _Key, Value, _Container) ->
-    {ok, Value};
-invoke1(Command, Key, _Value, Container) ->
-    invoke2(Command, Key, Container).
-
-invoke2(get, Key, Container) ->
+iterate(_, _, Container) when not is_map(Container) ->
+    {error, badarg};
+iterate(get, [Key], Container) ->
     maps:find(Key, Container);
-invoke2({put, Value}, Key, Container) ->
+iterate({put, Value}, [Key], Container) ->
     NewC = maps:put(Key, Value, Container),
     {dirty, NewC};
-invoke2(delete, Key, Container) ->
+iterate(delete, [Key], Container) ->
     NewC = maps:remove(Key, Container),
     {dirty, NewC};
-invoke2(_Unknown, _, _) ->
-    {error, unknown}.
+iterate(Command, [Key | Path], Container) ->
+    case maps:find(Key, Container) of
+        {ok, Branch} ->
+            case iterate(Command, Path, Branch) of
+                {dirty, NewB} ->
+                    {dirty, Container#{Key := NewB}};
+                Result ->
+                    Result
+            end;
+        error ->
+            {error, badarg}
+    end;
+iterate(_, _, _) ->
+    {error, badarg}.
 
 %%--------------------------------------------------------------------
 %% This function is called by a gen_server when it is about to
@@ -619,6 +601,7 @@ terminate(Reason, State) ->
     %% leave is reused by init function for uninitialization.
     leave(FinalState).
 
+%% Active attributes and monitors are released by otp process.
 leave(State) ->
     {Sign, State1} = try_exit(State),
     State2 = State1#{'_exit_time' => erlang:system_time(),
@@ -629,28 +612,31 @@ leave(State) ->
                  error ->
                      Sign
              end,
-    FinalState = notify_all(State2, {leave, Vector}),
+    FinalState = notify_subscribers(State2, {leave, Vector}),
     notify_fsm(FinalState, Sign).
 
-notify_all(#{'_subscribers' := Subs} = State, Info) ->
+notify_subscribers(#{'_subscribers' := Subs} = State, Info) ->
     maps:fold(fun(Mref, Pid, Acc) ->
                       catch Pid ! {Mref, Info},
-                      demonitor(Mref),
+                      demonitor(Mref, [flush]),
                       Acc
               end, 0, Subs),
     maps:remove('_subscribers', State);
-notify_all(State, _) ->
+notify_subscribers(State, _) ->
     State.
 
-notify_fsm(#{'_fsm' := Fsm} = State, Sign) ->
+notify_fsm(#{'_parent' := Fsm} = State, Sign) ->
     case is_process_alive(Fsm) of
         true ->
             Fsm ! {xlx_leave, {State, Sign}},
             flush_and_relay(Fsm),
-            normal;
+            ok;
         false ->
-            normal
-    end.
+            ok
+    end;
+notify_fsm(_, _) ->
+    ok.
+
 
 %% flush system messages and reply application messages.
 flush_and_relay(Pid) ->
@@ -683,15 +669,15 @@ try_exit(State) ->
 
 stop_fsm(#{'_status' := stopping} = Fsm, _Reason) ->
     Fsm;
-stop_fsm(#{'_state' := Pid} = Fsm, Reason) ->
-    case is_process_alive(Pid) of
-        true ->
-            Timeout = maps:get(<<"_timeout">>, Fsm,  ?DFL_TIMEOUT),
-            {stopped, {Final, Sign}} = stop(Pid, Reason, Timeout),
-            Fsm#{'_state' := Final, '_sign' => Sign, '_reason' => Reason};
-        false ->
-            Fsm
+stop_fsm(#{'_state' := {link, Pid, _}} = Fsm, Reason) ->
+    Timeout = maps:get(<<"_timeout">>, Fsm,  ?DFL_TIMEOUT),
+    case stop(Pid, Reason, Timeout) of
+        {ok, {Final, Sign}} ->
+            Fsm#{'_state' := {state, Final}, '_sign' => Sign, '_reason' => Reason};
+        {error, Error} ->
+            Fsm#{'_state' := exception, '_sign' => exception, '_reason' => Error}
     end.
+            
     
 %%--------------------------------------------------------------------
 %% Convert process state when code is changed
@@ -756,13 +742,13 @@ stop(Process, Reason, Timeout) ->
     receive
         {xlx_leave, Result} ->
             demonitor(Mref, [flush]),
-            {stopped, Result};
+            {ok, Result};
         {'DOWN', Mref, _, _, Result} ->
-            {'EXIT', Result}
+            {error, Result}
     after
         Timeout ->
             demonitor(Mref, [flush]),
-            erlang:exit(timeout)
+            {error, timeout}
     end.
 
 -spec subscribe(process()) -> {'ok', reference()}.
@@ -792,15 +778,17 @@ notify(Process, Tag, Info) ->
                                   {data, term(), state()} |
                                   {error, term(), state()}.
 %% Raw data types of attributes:
-%% {link, pid(), local} | {link, pid(), reference()} |
-%%  #{'_actions' := actions()} | term().
+%% {link, pid(), local | reference()} | {state, state()} |
+%%  {state, state(), actions()} | Value :: term().
 %% when actions() :: state | module() | Module :: binary() | Actions :: map().
 activate(Key, State) ->
     case maps:find(Key, State) of
         {ok, {link, Pid, _}} ->
             {pid, Pid, State};
-        {ok, #{'_actions' := Actions} = Value} ->
-            activate(Actions, Key, Value, State);
+        {ok, {state, S, Actions}} ->
+            activate(Actions, Key, S, State);
+        {ok, {state, S}} ->
+            activate(undefined, Key, S, State);
         {ok, Value} ->
             {data, Value, State};
         error ->  % not found, try to activate data in '_links'.
@@ -809,11 +797,14 @@ activate(Key, State) ->
 
 %% Value must be map type. Spawn state machine and link it as active attribute.
 activate(Key, Value, #{'_monitors' := M} = State) ->
-    {ok, Pid} = xl_state:start_link(Value),
+    {ok, Pid} = start_link(Value#{'_parent' => self()}),
     Monitors = M#{Pid => Key},
     {pid, Pid, State#{Key => {link, Pid, local}, '_monitors' := Monitors}}.
 
 %% Intermediate function to bind behaviors with state.
+activate(undefined, Key, Value, State) ->
+    Actions = maps:get('_actions', Value, state),
+    activate(Actions, Key, Value, State);
 activate(state, Key, Value, State) ->
     activate(Key, Value, State);
 activate(Module, Key, Value, State) when is_atom(Module) ->
@@ -840,8 +831,7 @@ attach(Key, #{'_links' := Links} = State) ->
             {pid, Pid, S#{Key => {link, Pid, Mref}, '_monitors' := M1}};
         %% state data to spawn link local child actor.
         {state, Data, S} ->
-            Actions = maps:get('_actions', Data, state),
-            activate(Actions, Key, Data, S);
+            activate(undefined, Key, Data, S);
         %% data only, copy it as initial value.
         {data, Data, S} ->
             {data, Data, S#{Key => Data}};
@@ -935,14 +925,14 @@ get_all(State) ->
     {ok, maps:filter(Pred, State), State}.
 
 put(Key, Value, State) ->
-    S = unlink_raw(Key, State),
+    S = unlink(Key, State),
     {ok, done, S#{Key => Value}}.
 
 delete(Key, State) ->
-    S = unlink_raw(Key, State),
+    S = unlink(Key, State),
     {ok, done, maps:remove(Key, S)}.
 
-unlink_raw(Key, #{'_monitors' := M} = State) ->
+unlink(Key, #{'_monitors' := M} = State) ->
     case maps:find(Key, State) of
         {ok, {link, Pid, local}} ->
             unlink(Pid),
@@ -950,7 +940,7 @@ unlink_raw(Key, #{'_monitors' := M} = State) ->
             cast(Pid, {stop, update}),
             State#{'_monitors' := M1};
         {ok, {link, _, Monitor}} ->
-            demonitor(Monitor),
+            demonitor(Monitor, [flush]),
             M1 = maps:remove(Monitor, M),
             State#{'_monitors' := M1};
         {ok, _} ->
