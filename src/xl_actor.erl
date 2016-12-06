@@ -21,7 +21,6 @@
 -export([create/1, create/2]).
 -export([call/2, call/3, call/4, cast/2, reply/2]).
 -export([subscribe/1, subscribe/2, unsubscribe/2, notify/2, notify/3]).
--export([get/2, put/3, delete/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -410,50 +409,49 @@ default_react({xlx, _From, [], Command}, State) ->
     recall(Command, State);
 default_react({xlx, From, Path, Command}, State) ->
     traverse(From, Path, Command, State);
-default_react({'DOWN', M, process, _, _}, #{'_subscribers' := Subs} = S) ->
-    Subs1 = maps:remove(M, Subs),
-    {ok, S#{'_subscribers' := Subs1}};  % todo: DOWN for links
-default_react({'EXIT', _, Reason} = Exit, Fsm) ->
-    case maps:find('_state', #{'_status' := Status} = Fsm) of
-        {ok, _} when Status =:= running ->
-            transfer(Fsm#{'_reason' => Reason}, exception);
-        _Unexpected ->
-            {stop, Exit, Fsm}
-    end;
+default_react({'DOWN', M, process, _, Reason}, State) ->
+    handle_halt(M, Reason, State);
+default_react({'EXIT', Pid, Reason}, State) ->
+    handle_halt(Pid, Reason, State);
 default_react(_Info, State) ->
     {ok, State}.
 
-%% data read, any key type
-recall({get, Key}, State) ->
-    recall({get, Key, raw}, State);
-recall({get, Key, raw}, State) ->
-    case maps:find(Key, State) of
+handle_halt(Id, Reason, #{'_monitors' := M} = State) ->
+    case maps:find(Id, M) of
+        {ok, '_state'} ->
+            transfer(State#{'_reason' => Reason}, exception);
+        {ok, Key} ->
+            {ok, done, S} = delete(Key, State),
+            {ok, S};
+        error when is_reference(Id) ->
+            Subs = maps:get('_subscribers', State),
+            Subs1 = maps:remove(Id, Subs),
+            {ok, State#{'_subscribers' := Subs1}};
         error ->
-            {error, undefined, State};
-        {ok, Value} ->
-            {ok, Value, State}
-    end;
-recall({get, Key, active}, State) ->
+            {ok, State}
+    end.
+
+%% Retrieve data, Activate or peek the attribute.
+recall({touch, Key}, State) ->
+    activate(Key, State);
+recall({get, Key}, State) ->
     get(Key, State);
-%% Update or new data entry with the KV pair, key must not be atom type.
+recall({get, Key, raw}, State) ->
+    get_raw(Key, State);
+recall(get, State) ->
+    get_all(State);  % Exclude internal attributes and active attributes.
+%% Update data
+%% Internal attributes names are atom type, cannot be changed externally. 
+recall({put, Key, _}, State) when is_atom(Key) ->
+    {error, forbidden, State};
 recall({put, Key, Value}, State) ->
-    recall({put, Key, Value, raw}, State);
-recall({put, Key, _, _}, State) when is_atom(Key) ->
-    {error, forbidden, State};
-recall({put, Key, Value, raw}, State) ->
-    NewS = maps:put(Key, Value, State),
-    {ok, NewS};
-recall({put, Key, Value, active}, State) ->
     put(Key, Value, State);
-recall({delete, Key}, State) ->
-    recall({delete, Key, raw}, State);
-recall({delete, Key, _}, State) when is_atom(Key) ->
+%% Purge data
+recall({delete, Key}, State) when is_atom(Key) ->
     {error, forbidden, State};
-recall({delete, Key, raw}, State) ->
-    NewS = maps:remove(Key, State),
-    {ok, NewS};
-recall({delete, Key, active}, State) ->
+recall({delete, Key}, State) ->
     delete(Key, State);
+%% Suberscribe and notify
 recall({subscribe, Pid}, State) ->
     Subs = maps:get('_subscribers', State, #{}),
     Mref = monitor(process, Pid),
@@ -523,6 +521,7 @@ t1(Fsm, _From, _To) ->  % no states set, halt.
 
 t2({stop, Reason, #{'_state' := Pid} = Fsm}, State, Sign) ->
     unlink(Pid),
+% todo: remove from monitors.
     Fsm1 = Fsm#{'_status' := stopping, '_state' := State, '_sign' => Sign},
     {stop, Reason, Fsm1};
 t2(Ok, _State, _Sign) ->
@@ -793,12 +792,12 @@ notify(Process, Tag, Info) ->
                                   {data, term(), state()} |
                                   {error, term(), state()}.
 %% Raw data types of attributes:
-%% {link, local, pid()} | {link, ref(), pid()} |
+%% {link, pid(), local} | {link, pid(), reference()} |
 %%  #{'_actions' := actions()} | term().
 %% when actions() :: state | module() | Module :: binary() | Actions :: map().
 activate(Key, State) ->
     case maps:find(Key, State) of
-        {ok, {link, _, Pid}} ->
+        {ok, {link, Pid, _}} ->
             {pid, Pid, State};
         {ok, #{'_actions' := Actions} = Value} ->
             activate(Actions, Key, Value, State);
@@ -812,7 +811,7 @@ activate(Key, State) ->
 activate(Key, Value, #{'_monitors' := M} = State) ->
     {ok, Pid} = xl_state:start_link(Value),
     Monitors = M#{Pid => Key},
-    {pid, Pid, State#{Key => {link, local, Pid}, '_monitors' := Monitors}}.
+    {pid, Pid, State#{Key => {link, Pid, local}, '_monitors' := Monitors}}.
 
 %% Intermediate function to bind behaviors with state.
 activate(state, Key, Value, State) ->
@@ -838,7 +837,7 @@ attach(Key, #{'_links' := Links} = State) ->
         {pid, Pid, #{'_monitors' := M} = S} ->
             Mref = monitor(process, Pid),
             M1 = M#{Mref => Key},
-            {pid, Pid, S#{Key => {link, Mref, Pid}, '_monitors' := M1}};
+            {pid, Pid, S#{Key => {link, Pid, Mref}, '_monitors' := M1}};
         %% state data to spawn link local child actor.
         {state, Data, S} ->
             Actions = maps:get('_actions', Data, state),
@@ -857,10 +856,12 @@ attach(Key, #{'_links' := Links} = State) ->
 %%                                   {error, term(), state()}.
 fetch_link(Key, Links, State) when is_function(Links) ->
     Links(Key, State);
-%% Links pid type response:
-%% {pid, pid()} | {state, state()} | {data, term()} | {error, term()}.
+%% Links pid type:
+%% send special command 'touch': {xlx, From, {touch, Key}}
+%%   argument: Key :: key()
+%%   return: {pid, pid()} | {state, state()} | {data, term()} | {error, term()}.
 fetch_link(Key, Links, #{'_timeout' := Timeout} = State) when is_pid(Links) ->
-    {Sign, Result} = call(Links, {ref, Key}, Timeout),
+    {Sign, Result} = call(Links, {touch, Key}, Timeout),
     {Sign, Result, State};
 %% Links map type format:
 %% {ref, Pid, Id} | {ref, Key, Id} | {state, Map} | Data
@@ -872,13 +873,13 @@ fetch_link(Key, Links, #{'_timeout' := Timeout} = State) ->
             {error, undefined, State};
         %% pid of registry actor directly.
         {ok, {ref, Registry, Id}} when is_pid(Registry) ->
-            {Sign, Result} = call(Registry, {ref, Id}, Timeout),
+            {Sign, Result} = call(Registry, {touch, Id}, Timeout),
             {Sign, Result, State};
         %% attribute name as registry.
         {ok, {ref, RegName, Id}} ->
             case activate(RegName, State) of
                 {pid, Registry, State1} ->
-                    {Sign, Result} = call(Registry, {ref, Id}, Timeout),
+                    {Sign, Result} = call(Registry, {touch, Id}, Timeout),
                     {Sign, Result, State1};
                 {data, Data, State1} when Id =/= undefined ->
                     Value = maps:get(Id, Data),
@@ -912,6 +913,7 @@ get(Key, State) ->
             Error
     end.
 
+%% Raw data in state attributes map.
 get_raw(Key, State) ->
     case maps:find(Key, State) of
         {ok, Value} ->
@@ -920,61 +922,42 @@ get_raw(Key, State) ->
             {error, undefined, State}
     end.
 
-%% -spec put(key(), Value, state()) -> {'ok', Value, state()}
-%%                                         when Value :: term().
+%% Pick all exportable attributes,
+%%   exclude active attributes or attributes with atom type name.
+get_all(State) ->
+    Pred = fun(_, {link, _, _}) ->
+                   false;
+              (Key, _) when is_atom(Key) ->
+                   false;
+              (_, _) ->
+                   true
+           end,
+    {ok, maps:filter(Pred, State), State}.
+
 put(Key, Value, State) ->
-    case activate(Key, State) of
-        {pid, Pid, #{'_timeout' := Timeout} = State1} ->
-            {Sign, Result} = call(Pid, {put, Value}, Timeout),
-            {Sign, Result, State1};
-        {data, _, State1} ->
-            {ok, update, State1#{Key => Value}};
-        Error ->
-            Error
-    end.
+    S = unlink_raw(Key, State),
+    {ok, done, S#{Key => Value}}.
 
-put_raw(Key, Value, #{'_monitors' := M} = State) ->
-    S = case maps:find(Key, State) of
-            {ok, {link, local, Pid}} ->
-                unlink(Pid),
-                M1 = maps:remove(Pid, M),
-                cast(Pid, {stop, update}),
-                State#{Key := Value, '_monitors' := M1};
-            {ok, {link, Monitor, _}} ->
-                demonitor(Monitor),
-                M1 = maps:remove(Monitor, M),
-                State#{Key := Value, '_monitors' := M1};
-            {ok, _} ->
-                State#{Key := Value};
-            error ->
-                State#{Key => Value}
-        end,
-    {ok, update, S}.
-
-%%%%%%%%
--spec delete(key(), state()) -> {'ok', state()} |
-                                {'error', 'undefined', state()}.
-delete(Key, #{'_monitors' := M} = State) ->
-    case activate(Key, State) of
-        {pid, Pid, #{'_timeout' := Timeout} = State1} ->
-            {Sign, Result} = call(Pid, {put, Value}, Timeout),
-            {Sign, Result, State1};
-        {data, _, State1} ->
-            {ok, delete, State1#{Key => Value}};
-        Error ->
-            Error
-    end.
-    case maps:find(Key, State) of
-        {ok, V} when is_pid(V) ->
-            erlang:unlink(V),
-            M1 = maps:remove(V, M),
-            S1 = maps:remove(Key, State),
-            {ok, S1#{'_monitors' := M1}};
-        _ ->
-            {ok, maps:remove(Key, State)}
-    end;
 delete(Key, State) ->
-    {ok, maps:remove(Key, State)}.
+    S = unlink_raw(Key, State),
+    {ok, done, maps:remove(Key, S)}.
+
+unlink_raw(Key, #{'_monitors' := M} = State) ->
+    case maps:find(Key, State) of
+        {ok, {link, Pid, local}} ->
+            unlink(Pid),
+            M1 = maps:remove(Pid, M),
+            cast(Pid, {stop, update}),
+            State#{'_monitors' := M1};
+        {ok, {link, _, Monitor}} ->
+            demonitor(Monitor),
+            M1 = maps:remove(Monitor, M),
+            State#{'_monitors' := M1};
+        {ok, _} ->
+            State;
+        error ->
+            State
+    end.
 
 %%%===================================================================
 %%% Unit test
