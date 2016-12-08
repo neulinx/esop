@@ -58,8 +58,10 @@
              '_exit' => exit(),
              '_pid' => pid(),
              '_parent' => pid(),
+             '_surname' => key(),
              '_reason' => reason(),
              '_status' => status(),
+             '_recovery' => recovery(),
              '_subscribers' => map(),
              '_entry_time' => pos_integer(),
              '_exit_time' => pos_integer(),
@@ -68,6 +70,7 @@
              '_states' => map() | function() | active_attribute(),
              '_step' => non_neg_integer(),
 %%---------- Actor attributes --------
+             '_monitors' => monitor(),
              '_links' => map() | pid() | function()
 %%---------- Customized attributes --------
 %             <<"_max_steps">> => limit(),
@@ -82,7 +85,11 @@
 %             <<"_hibernate">> => timeout()  % mandatory, default: infinity
             } | map().
 
--type active_attribute() :: {'link', process(), 'local' | reference()}.
+-type monitor() :: {key(), recovery()}.
+-type monitors() :: #{process() | reference() => monitor()}.
+-type active_attribute() :: {'link',
+                             process(),
+                             non_neg_integer() | reference()}.
 -type key() :: atom() | string() | binary().
 -type tag() :: 'xlx'.
 -type path() :: [key()].
@@ -90,7 +97,7 @@
                    {tag(), from(), Path :: list(), Command :: term()}.
 -type notification() :: {tag(), Notification :: term()}.
 -type message() :: request() | notification().
--type code() :: 'ok' | 'error' | 'stop' | 'pending' | key().
+-type code() :: 'ok' | 'error' | 'stop' | key().
 -type result() :: {'noreply', state()} |
                   {code(), state()} |
                   {code(), term(), state()} |
@@ -98,6 +105,7 @@
 -type output() :: {'stopped', term()} |
                   {'exception', term()} |
                   {'EXIT', term()} |
+                  {'DOWN', term()} |
                   {Sign :: term(), term()}.
 -type reply() :: {'ok', term()} | 'ok' |
                  {'error', term()} | 'error' |
@@ -108,10 +116,15 @@
                   'stopped' |
                   'exception' |
                   'failover'.
--type reason() :: 'normal' | 'unload' | term(). 
+-type reason() :: 'normal' | term(). 
 -type entry() :: fun((state()) -> result()).
 -type exit() :: fun((state()) -> output()).
 -type react() :: fun((message() | term(), state()) -> result()).
+-type recovery() :: {'rollback', integer()} |
+                    {'restore', state() | vector()} |
+                    'relink' |
+                    'undefined'.
+-type vector() :: {state() | key(), key()}.
 
 %%-type behavior() :: 'state' | <<"state">> | module() | binary().
 
@@ -673,9 +686,13 @@ stop_fsm(#{'_state' := {link, Pid, _}} = Fsm, Reason) ->
     Timeout = maps:get(<<"_timeout">>, Fsm,  ?DFL_TIMEOUT),
     case stop(Pid, Reason, Timeout) of
         {ok, {Final, Sign}} ->
-            Fsm#{'_state' := {state, Final}, '_sign' => Sign, '_reason' => Reason};
+            Fsm#{'_state' := {state, Final},
+                 '_sign' => Sign,
+                 '_reason' => Reason};
         {error, Error} ->
-            Fsm#{'_state' := exception, '_sign' => exception, '_reason' => Error}
+            Fsm#{'_state' := exception,
+                 '_sign' => exception,
+                 '_reason' => Error}
     end.
             
     
@@ -774,64 +791,71 @@ notify(Process, Tag, Info) ->
 %%--------------------------------------------------------------------
 %% Helper functions for active attribute access.
 %%--------------------------------------------------------------------
+%% Data types of attributes:
+%% {link, pid(), Step :: non_neg_integer() | Monitor :: reference()} |
+%%   {state, {state(), actions(), recovery()}} | {state, state()} |
+%%   {relink} |
+%%   Value :: term().
+%% when actions() :: state | module() | Module :: binary() | Actions :: map().
 -spec activate(key(), state()) -> {pid, pid(), state()} |
                                   {data, term(), state()} |
                                   {error, term(), state()}.
-%% Raw data types of attributes:
-%% {link, pid(), local | reference()} | {state, state()} |
-%%  {state, state(), actions()} | Value :: term().
-%% when actions() :: state | module() | Module :: binary() | Actions :: map().
 activate(Key, State) ->
     case maps:find(Key, State) of
         {ok, {link, Pid, _}} ->
             {pid, Pid, State};
-        {ok, {state, S, Actions}} ->
-            activate(Actions, Key, S, State);
         {ok, {state, S}} ->
-            activate(undefined, Key, S, State);
+            activate(Key, S, State);
+        {ok, {relink}} ->
+            attach(Key, relink, State);
         {ok, Value} ->
             {data, Value, State};
         error ->  % not found, try to activate data in '_links'.
-            attach(Key, State)
+            attach(Key, undefined, State)
     end.
 
-%% Value must be map type. Spawn state machine and link it as active attribute.
-activate(Key, Value, #{'_monitors' := M} = State) ->
-    {ok, Pid} = start_link(Value#{'_parent' => self()}),
-    Monitors = M#{Pid => Key},
-    {pid, Pid, State#{Key => {link, Pid, local}, '_monitors' := Monitors}}.
+activate(Key, {S, Actions, Recovery}, State) ->
+    activate(Actions, Key, S, Recovery, State);
+activate(Key, Value, State) ->
+    Actions = maps:get('_actions', Value, state),
+    Recovery = maps:get('_recovery', Value, undefined),
+    activate(Actions, Key, Value, Recovery, State).
 
 %% Intermediate function to bind behaviors with state.
-activate(undefined, Key, Value, State) ->
-    Actions = maps:get('_actions', Value, state),
-    activate(Actions, Key, Value, State);
-activate(state, Key, Value, State) ->
-    activate(Key, Value, State);
-activate(Module, Key, Value, State) when is_atom(Module) ->
+activate(state, Key, Value, Recovery, State) ->
+    activate(Key, Value, Recovery, State);
+activate(Module, Key, Value, Recovery, State) when is_atom(Module) ->
     Value1 = create(Module, Value),
-    activate(Key, Value1, State);
-activate(Module, Key, Value, State) when is_binary(Module) ->
+    activate(Key, Value1, Recovery, State);
+activate(Module, Key, Value, Recovery, State) when is_binary(Module) ->
     Module1 = binary_to_existing_atom(Module, utf8),
-    activate(Module1, Key, Value, State);
+    activate(Module1, Key, Value, Recovery, State);
 %% Actions is map type with state behaviors: #{'_entry', '_react', '_exit'}.
-activate(Actions, Key, Value, State) when is_map(Actions) ->
+activate(Actions, Key, Value, Recovery, State) when is_map(Actions) ->
     Value1 = maps:merge(Value, Actions),
-    activate(Key, Value1, State);
-activate(_Unknown, _Key, _Value, State) ->    
+    activate(Key, Value1, Recovery, State);
+activate(_Unknown, _Key, _Value, _Recovery, State) ->    
     {error, unknown, State}.
+
+%% Value must be map type. Spawn state machine and link it as active attribute.
+activate(Key, Value, Recovery, #{'_monitors' := M} = State) ->
+    {ok, Pid} = start_link(Value#{'_parent' => self(), '_surname' => Key}),
+    Monitors = M#{Pid => {Key, Recovery}},
+    {pid, Pid, State#{Key => {link, Pid, 0}, '_monitors' := Monitors}}.
 
 %% Try to retrieve data or external actor,
 %%  and attach to attribute of current actor.
-attach(Key, #{'_links' := Links} = State) ->
+%% Here: Reovery :: relink | undeinfed.
+attach(Key, Recovery, #{'_links' := Links} = State) ->
     case fetch_link(Key, Links, State) of
         %% external actor.
         {pid, Pid, #{'_monitors' := M} = S} ->
             Mref = monitor(process, Pid),
-            M1 = M#{Mref => Key},
+            M1 = M#{Mref => {Key, Recovery}},
             {pid, Pid, S#{Key => {link, Pid, Mref}, '_monitors' := M1}};
         %% state data to spawn link local child actor.
         {state, Data, S} ->
-            activate(undefined, Key, Data, S);
+            activate(Key, Data, S);
         %% data only, copy it as initial value.
         {data, Data, S} ->
             {data, Data, S#{Key => Data}};
@@ -839,23 +863,27 @@ attach(Key, #{'_links' := Links} = State) ->
             Error
     end.
 
+%% -type state_d() :: state() | {state(), actions(), recovery()}.
+%% -type result() :: {pid, pid(), state()} | 
+%%                 {state, state_d(), state()} |
+%%                 {data, term(), state()} |
+%%                 {error, term(), state()}.
 %% Links function type:
-%% -spec link_fun(key(), state()) -> {pid, pid(), state()} |
-%%                                   {state, state(), state()} |
-%%                                   {data, term(), state()} |
-%%                                   {error, term(), state()}.
+%% -spec link_fun(key(), state()) -> result().
 fetch_link(Key, Links, State) when is_function(Links) ->
     Links(Key, State);
 %% Links pid type:
-%% send special command 'touch': {xlx, From, {touch, Key}}
-%%   argument: Key :: key()
-%%   return: {pid, pid()} | {state, state()} | {data, term()} | {error, term()}.
+%% send special command 'touch': {xlx, From, {touch, Key}},
+%%   argument: Key :: key(),
+%%   return: result() without last state() element.
 fetch_link(Key, Links, #{'_timeout' := Timeout} = State) when is_pid(Links) ->
     {Sign, Result} = call(Links, {touch, Key}, Timeout),
     {Sign, Result, State};
 %% Links map type format:
-%% {ref, Pid, Id} | {ref, Key, Id} | {state, Map} | Data
-%% return: {pid, pid(), state()} | {state, state(), state()}
+%% {ref, Registry :: (pid() | key()), key()} |
+%%   {state, state_d()} |
+%%   {data, term()}.
+%% return: {pid, pid(), state()} | {state, state_d(), state()}
 %%     | {data, term(), state()} | {error, term(), state()}.
 fetch_link(Key, Links, #{'_timeout' := Timeout} = State) ->
     case maps:find(Key, Links) of
@@ -882,8 +910,10 @@ fetch_link(Key, Links, #{'_timeout' := Timeout} = State) ->
         %% Explicit state data to spawn actor.
         {ok, {state, Data}} ->
             {state, Data, State};
-        {ok, Data} ->
-            {data, Data, State}
+        {ok, {data, Data}} ->
+            {data, Data, State};
+        _Unknown ->
+            {error, badarg, State}
     end.
 
 %%--------------------------------------------------------------------
