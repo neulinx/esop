@@ -58,20 +58,16 @@
              '_exit' => exit(),
              '_pid' => pid(),
              '_parent' => pid(),
-             '_surname' => key(),
+             '_surname' => tag(),
              '_reason' => reason(),
              '_status' => status(),
+             '_sign' => tag(),
              '_recovery' => recovery(),
              '_subscribers' => map(),
              '_entry_time' => pos_integer(),
              '_exit_time' => pos_integer(),
-%%---------- FSM attributes --------
-             '_state' => active_attribute() | state() | term(),
-             '_states' => map() | function() | active_attribute(),
-             '_step' => non_neg_integer(),
-%%---------- Actor attributes --------
-             '_monitors' => monitor(),
-             '_links' => map() | pid() | function()
+             '_states' => active_key() | states_map() | links_map(),
+             '_monitors' => monitor()
 %%---------- Customized attributes --------
 %             <<"_max_steps">> => limit(),
 %             <<"_recovery">> => recovery(),
@@ -79,25 +75,27 @@
 %             <<"_retry_count">> => non_neg_integer(),
 %             <<"_retry_interval">> => non_neg_integer()
 %             <<"_name">> => name(),
-%             <<"_links">> => map(),
 %             <<"behavior">> => behavior(),
 %             <<"_timeout">> => timeout(),  % default: 5000
 %             <<"_hibernate">> => timeout()  % mandatory, default: infinity
             } | map().
 
--type monitor() :: {key(), recovery()}.
+-type monitor() :: {tag(), recovery()}.
 -type monitors() :: #{process() | reference() => monitor()}.
--type active_attribute() :: {'link',
-                             process(),
-                             non_neg_integer() | reference()}.
--type key() :: atom() | string() | binary().
--type tag() :: 'xlx'.
--type path() :: [key()].
--type request() :: {tag(), from(), Command :: term()} |
-                   {tag(), from(), Path :: list(), Command :: term()}.
+-type active_key() :: {'link', process(), non_neg_integer() | reference()} |
+                      {'function', function()}.
+-type states_map() :: #{vector() => state()}.
+-type links_map() :: #{Key :: tag() => refers()}.
+-type refer() :: {'ref', Registry :: (process() | tag()), tag()}.
+-type state_d() :: state() | {state(), actions(), recovery()}.
+-type refers() :: refer() | state_d() | {data, term()}.
+-type tag() :: atom() | string() | binary() | integer().
+-type path() :: [tag()].
+-type request() :: {'xlx', from(), Command :: term()} |
+                   {'xlx', from(), Path :: list(), Command :: term()}.
 -type notification() :: {tag(), Notification :: term()}.
 -type message() :: request() | notification().
--type code() :: 'ok' | 'error' | 'stop' | key().
+-type code() :: 'ok' | 'error' | 'stop' | tag().
 -type result() :: {'noreply', state()} |
                   {code(), state()} |
                   {code(), term(), state()} |
@@ -116,17 +114,43 @@
                   'stopped' |
                   'exception' |
                   'failover'.
--type reason() :: 'normal' | term(). 
--type entry() :: fun((state()) -> result()).
+-type reason() :: 'normal' | term().
+-type entry_return() :: {'ok', state()} |
+                        {'ok', state(), timeout()} |
+                        {'ok', state(), 'hibernate'} |
+                        {'stop', Reason :: term()} |
+                        {'stop', Reason :: term(), state()}.
+-type entry() :: fun((state()) -> entry_return()).
 -type exit() :: fun((state()) -> output()).
 -type react() :: fun((message() | term(), state()) -> result()).
+-type actions() :: 'state' | module() | binary() | state_actions().
+-type state_actions() :: #{'_entry' => entry(),
+                           '_exit' => exit(),
+                           '_react' => react()}.
 -type recovery() :: {'rollback', integer()} |
-                    {'restore', state() | vector()} |
-                    'relink' |
+                    {'reset', integer() | state() | vector()} |
+                    'reset' |
                     'undefined'.
--type vector() :: {state() | key(), key()}.
+-type vector() :: {To :: tag()} |
+                  {From:: tag(), To :: tag()} |
+                  {Fsm :: tag(), From:: tag(), To :: tag()}.
+                  
 
 %%-type behavior() :: 'state' | <<"state">> | module() | binary().
+
+%%--------------------------------------------------------------------
+%% Messages format.
+%%--------------------------------------------------------------------
+%% System message format.
+%% - normal: {xlx, From, Command} -> {Code, Result} | {error, Error}.
+%% - traverse with path: {xlx, From, Path, Command} -> result().
+%% - notify: {xlx, Command} -> no_return. To be deprecated, merge into normal.
+%% - touch & activate command: {xlx, From, xl_touch} ->
+%%            {pid, Pid} | {state, state_d()} | {data, Data} | {error, Error}.
+%% - wakeup event: {xlx, xl_wakeup}, To be tuned.
+%% - hibernate command: {xlx, xl_hibernate}, To be tuned.
+%% - stop command: {xlx, {stop, Reason}}, To be tuned.
+%% - state transition event: {xlx, {xl_leave, Vector}}, To be tuned.
 
 %%--------------------------------------------------------------------
 %% Starts the server.
@@ -215,27 +239,43 @@ init(State) ->
     init_state(State).
 
 init_state(#{'_status' := running} = State) ->  % resume suspended state.
-    cast(self(), xlx_wakeup),  % notify to prepare state resume.
+    cast(self(), xl_wakeup),  % notify to prepare state resume.
     {ok, State#{'_pid' => self()}};
+%% Initialize must-have attributes to the state.
 init_state(State) ->
     Monitors = maps:get('_monitors', State, #{}),
-    %% '_links' should be initilized by loader.
-    Links = maps:get('_links', State, #{}),
+    %% '_states' should be initilized by loader.
+    States = maps:get('_states', State, #{}),
     Timeout = maps:get(<<"_timeout">>, State, ?DFL_TIMEOUT),
     State1 = State#{'_entry_time' => erlang:system_time(),
                     '_monitors' => Monitors,
-                    '_links' => Links,
+                    '_states' => States,
                     '_timeout' => Timeout,
                     '_pid' =>self(),
                     '_status' => running},
-    case enter(State1) of
-        {ok, State2} ->
-            {ok, init_fsm(State2)};
-        Stop ->
-            Stop
+    State2 = preload(State1),
+    case enter(State2) of
+        {ok, State3} ->
+            {ok, preload(State3)};
+        {ok, State3, Option} ->  % Option :: Timeout | hibernate.
+            {ok, preload(State3), Option};
+        Error ->
+            Error
     end.
 
-%% entry function not support timeout or hibernate if this is a FSM.
+preload(#{<<"_preload">> := Preload} = State) ->
+    MakeActive = fun(Key, S) ->
+                         case activate(Key, S) of
+                             {error, Error, S1} ->
+                                 error({preload_failure, Error});
+                             {_, _, S1} ->
+                                 S1
+                         end
+                 end,
+    lists:foldl(MakeActive, State, Preload);
+preload(State) ->
+    State.
+
 enter(#{'_entry' := Entry} = State) ->
     case Entry(State) of
         {stop, Reason, _S} ->
@@ -247,55 +287,55 @@ enter(State) ->
     {ok, State}.
 
 %%--------------------------------------------------------------------
-%% Initialize and launch FSM.
-%% Flag of FSM is the attribute named '_state' existed.
-%% Specially, '_state' and '_states' data should be initialized by loader.
-%% Initialization operation is for data load from persistent store.
-%%--------------------------------------------------------------------
-%% state type is FSM, initilize it.
-init_fsm(#{'_state' := _} = Fsm) ->
-    Step = maps:get(<<"_step">>, Fsm, 0),
-    Traces = maps:get(<<"_traces">>, Fsm, []),
-    MaxTraces = maps:get(<<"_max_traces">>, Fsm, ?MAX_TRACES),
-    Fsm1 = Fsm#{'_step' => Step,
-                '_traces' => Traces,
-                '_max_traces' => MaxTraces},
-    start_fsm(Fsm1);
-init_fsm(State) ->
-    State.
-
-%% Import external actor as FSM state.
-start_fsm(Fsm) ->
-    case activate('_state', Fsm) of
-        {pid, _, Fsm1} ->
-            Fsm1;
-        {data, Start, #{'_states' := States} = Fsm1} ->
-            State = next_state(Start, States),
-            start_fsm(Fsm1#{'_state' := {state, State}})
-    end.
-
-%%--------------------------------------------------------------------
-%% There is a graph structure in states set.
+%% States set is a map structure to keep state data, which is not only for FSMs
+%% but also for links. For FSMs, key of the state map must be tuple type.
 %%
-%% Sign must not be tuple type. Data in map should be {From, Sign} := To.
-%% The first level states is wildcard, Sign for any From.
+%% Each FSM type active attribute has its own states set. To store all the
+%% FSMs' states sets in a single map, key of the map should contains
+%% information of FSM name, state name and directive to next state. So the
+%% key format may be {FsmName, StateName, Direction} or
+%% {FsmName, {StateName, Direction}}. I prefer to use the flat format rather
+%%  than the nest format.
+%%
+%% There are rules for states map:
+%% - Sign must not be tuple type.
+%% - If {Surname, Name, Sign} is not found, then try {Name, Sign}.
+%% - If {Name, Sign} is not found, then try {Sign}.
+%% - If it is not found at last, throw excepion rather than return error.
 %%--------------------------------------------------------------------
+%% Helper function to gather information for .
+next(#{'_surname' := Key, <<"_name">> := Name}, Sign, States) ->
+    next_state({Key, Name, Sign}, States);
 next(#{<<"_name">> := Name}, Sign, States) ->
     next_state({Name, Sign}, States);
 next(Name, Sign, States) ->
     next_state({Name, Sign}, States).
 
+%% If first parameter is state data, return it without lookup.
+%% If there is no state data by key: {From, To}, try to find key: To.
 next_state(State, _) when is_map(State) ->
     State;
-next_state(Sign, States) when is_function(States) ->
-    States(Sign);
-next_state(Sign, States) ->
-    case maps:find(Sign, States) of
+%% -spec states(vector()) -> state().
+next_state(Vector, {function, States}) ->
+    States(Vector);
+next_state(Vector, {link, States, _}) ->
+    %% Internal data structure of States actor is same as States map.
+    %% touch operation may make a cache of #{{From, To} => state()} in States.
+    case call(States, {xl_touch, Vector}, Timeout) of
+        {data, Data} ->
+            Data;
+        _ ->
+            error({get_state, badarg})
+    end;
+next_state(Vector, States) ->
+    locate(Vector, States).
+
+locate(Vector, States) ->
+    case maps:find(Vector, States) of
         {ok, State} ->
             State;
         error ->
-            {_From, Next} = Sign,
-            maps:get(Next, States)
+            locate(erlang:delete_element(1, Vector), States)
     end.
 
 %%--------------------------------------------------------------------
@@ -337,10 +377,9 @@ normalize_msg({xlx, {Pid, _} = From, Path, subscribe}) ->
     {xlx, From, Path, {subscribe, Pid}};
 %% gen_server timeout as hibernate command.
 normalize_msg(tiemout) ->
-    {xlx, hibernate};
+    {xlx, xl_hibernate};
 normalize_msg(Msg) ->
     Msg.
-
 
 handle(Info, #{'_react' := React} = State) ->
     try
@@ -365,9 +404,9 @@ handle_2({xlx, {stop, Reason}}, {ok, State}) ->
 handle_2({xlx, {stop, Reason}}, {ok, _, State}) ->
     {stop, Reason, State};
 %% Hibernate command, not guarantee.
-handle_2({xlx, hibernate}, {ok, State}) ->
+handle_2({xlx, xl_hibernate}, {ok, State}) ->
     {noreply, State, hibernate};
-handle_2({xlx, hibernate}, {ok, _, State}) ->
+handle_2({xlx, xl_hibernate}, {ok, _, State}) ->
     {noreply, State, hibernate};
 %% Reply is not here when code is noreply or stop
 handle_2({xlx, _From, _, _}, {noreply, State}) ->
@@ -406,7 +445,7 @@ handle_3(Result) ->
 %% Default message handler called when message is 'unhandled' by react function.
 %%--------------------------------------------------------------------
 %% State transition message. From is state data or name.
-default_react({xlx_leave, Vector}, Fsm) ->
+default_react({xlx, {xl_leave, Vector}}, Fsm) ->
     transfer(Fsm, Vector);
 default_react({xlx, Info}, State) ->
     recast(Info, State);
@@ -437,7 +476,7 @@ handle_halt(Id, Reason, #{'_monitors' := M} = State) ->
     end.
 
 %% Retrieve data, Activate or peek the attribute.
-recall({touch, Key}, State) ->
+recall({xl_touch, Key}, State) ->
     activate(Key, State);
 recall({get, Key}, State) ->
     get(Key, State);
@@ -534,8 +573,12 @@ t2(Ok, _State, _Sign) ->
     Ok.
 
 %% Trace is a vector of form {From, To}
-archive(#{'_traces' := Traces} = Fsm, Trace) when is_function(Traces) ->
+archive(#{'_traces' := {function, Traces}} = Fsm, Trace) ->
     Traces(Fsm, Trace);
+archive(#{'_traces' := {link, Traces, _}} = Fsm, Trace) ->
+    Timeout = maps:get('_timeout', Fsm),
+    call(Traces, {xlx_trace, Trace}, Timeout),
+    Fsm;
 archive(#{'_traces' := Traces, '_max_traces' := Limit} = Fsm, Trace)  ->
     Traces1 = enqueue(Trace, Traces, Limit),
     Fsm#{'_traces' => Traces1};
@@ -641,7 +684,7 @@ notify_subscribers(State, _) ->
 notify_fsm(#{'_parent' := Fsm} = State, Sign) ->
     case is_process_alive(Fsm) of
         true ->
-            Fsm ! {xlx_leave, {State, Sign}},
+            cast(Fsm, {xl_leave, {State, Sign}}),
             flush_and_relay(Fsm),
             ok;
         false ->
@@ -757,7 +800,7 @@ stop(Process, Reason, Timeout) ->
     Mref = monitor(process, Process),
     cast(Process, {stopped, Reason}),
     receive
-        {xlx_leave, Result} ->
+        {xlx, {xl_leave, Result}} ->
             demonitor(Mref, [flush]),
             {ok, Result};
         {'DOWN', Mref, _, _, Result} ->
@@ -794,23 +837,23 @@ notify(Process, Tag, Info) ->
 %% Data types of attributes:
 %% {link, pid(), Step :: non_neg_integer() | Monitor :: reference()} |
 %%   {state, {state(), actions(), recovery()}} | {state, state()} |
-%%   {relink} |
+%%   {reset} |
 %%   Value :: term().
 %% when actions() :: state | module() | Module :: binary() | Actions :: map().
--spec activate(key(), state()) -> {pid, pid(), state()} |
-                                  {data, term(), state()} |
-                                  {error, term(), state()}.
+%% -spec activate(tag(), state()) -> {pid, pid(), state()} |
+%%                                   {data, term(), state()} |
+%%                                   {error, term(), state()}.
 activate(Key, State) ->
     case maps:find(Key, State) of
         {ok, {link, Pid, _}} ->
             {pid, Pid, State};
         {ok, {state, S}} ->
             activate(Key, S, State);
-        {ok, {relink}} ->
-            attach(Key, relink, State);
+        {ok, {reset}} ->
+            attach(Key, reset, State);
         {ok, Value} ->
             {data, Value, State};
-        error ->  % not found, try to activate data in '_links'.
+        error ->  % not found, try to activate data in '_states'.
             attach(Key, undefined, State)
     end.
 
@@ -845,8 +888,8 @@ activate(Key, Value, Recovery, #{'_monitors' := M} = State) ->
 
 %% Try to retrieve data or external actor,
 %%  and attach to attribute of current actor.
-%% Here: Reovery :: relink | undeinfed.
-attach(Key, Recovery, #{'_links' := Links} = State) ->
+%% Here: Reovery :: reset | undeinfed.
+attach(Key, Recovery, #{'_states' := Links} = State) ->
     case fetch_link(Key, Links, State) of
         %% external actor.
         {pid, Pid, #{'_monitors' := M} = S} ->
@@ -869,18 +912,18 @@ attach(Key, Recovery, #{'_links' := Links} = State) ->
 %%                 {data, term(), state()} |
 %%                 {error, term(), state()}.
 %% Links function type:
-%% -spec link_fun(key(), state()) -> result().
-fetch_link(Key, Links, State) when is_function(Links) ->
+%% -spec link_fun(tag(), state()) -> result().
+fetch_link(Key, {function, Links}, State) ->
     Links(Key, State);
 %% Links pid type:
-%% send special command 'touch': {xlx, From, {touch, Key}},
-%%   argument: Key :: key(),
+%% send special command 'touch': {xlx, From, {xl_touch, Key}},
+%%   argument: Key :: tag(),
 %%   return: result() without last state() element.
-fetch_link(Key, Links, #{'_timeout' := Timeout} = State) when is_pid(Links) ->
-    {Sign, Result} = call(Links, {touch, Key}, Timeout),
+fetch_link(Key, {link, Links, _}, #{'_timeout' := Timeout} = State) ->
+    {Sign, Result} = call(Links, {xl_touch, Key}, Timeout),
     {Sign, Result, State};
 %% Links map type format:
-%% {ref, Registry :: (pid() | key()), key()} |
+%% {ref, Registry :: (pid() | tag()), tag()} |
 %%   {state, state_d()} |
 %%   {data, term()}.
 %% return: {pid, pid(), state()} | {state, state_d(), state()}
@@ -889,15 +932,16 @@ fetch_link(Key, Links, #{'_timeout' := Timeout} = State) ->
     case maps:find(Key, Links) of
         error ->
             {error, undefined, State};
-        %% pid of registry actor directly.
+        %% Registry process directly.
+        %% Should be deprecated because of no monitor.
         {ok, {ref, Registry, Id}} when is_pid(Registry) ->
-            {Sign, Result} = call(Registry, {touch, Id}, Timeout),
+            {Sign, Result} = call(Registry, {xl_touch, Id}, Timeout),
             {Sign, Result, State};
         %% attribute name as registry.
         {ok, {ref, RegName, Id}} ->
             case activate(RegName, State) of
                 {pid, Registry, State1} ->
-                    {Sign, Result} = call(Registry, {touch, Id}, Timeout),
+                    {Sign, Result} = call(Registry, {xl_touch, Id}, Timeout),
                     {Sign, Result, State1};
                 {data, Data, State1} when Id =/= undefined ->
                     Value = maps:get(Id, Data),
@@ -948,6 +992,8 @@ get_all(State) ->
     Pred = fun(_, {link, _, _}) ->
                    false;
               (Key, _) when is_atom(Key) ->
+                   false;
+              (Key, _) when is_tuple(Key) ->
                    false;
               (_, _) ->
                    true
