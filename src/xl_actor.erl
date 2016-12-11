@@ -19,8 +19,8 @@
 -export([start/1, start/2, start/3]).
 -export([stop/1, stop/2, stop/3]).
 -export([create/1, create/2]).
--export([call/2, call/3, call/4, cast/2, reply/2]).
--export([subscribe/1, subscribe/2, unsubscribe/2, notify/2, notify/3]).
+-export([call/2, call/3, call/4, reply/2]).
+-export([subscribe/1, subscribe/2, unsubscribe/2, notify/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -67,7 +67,7 @@
              '_entry_time' => pos_integer(),
              '_exit_time' => pos_integer(),
              '_states' => active_key() | states_map() | links_map(),
-             '_monitors' => monitor()
+             '_monitors' => monitors()
 %%---------- Customized attributes --------
 %             <<"_max_steps">> => limit(),
 %             <<"_recovery">> => recovery(),
@@ -136,21 +136,19 @@
                   {Fsm :: tag(), From:: tag(), To :: tag()}.
                   
 
-%%-type behavior() :: 'state' | <<"state">> | module() | binary().
-
 %%--------------------------------------------------------------------
 %% Messages format.
 %%--------------------------------------------------------------------
 %% System message format.
 %% - normal: {xlx, From, Command} -> {Code, Result} | {error, Error}.
 %% - traverse with path: {xlx, From, Path, Command} -> result().
-%% - notify: {xlx, Command} -> no_return. To be deprecated, merge into normal.
 %% - touch & activate command: {xlx, From, xl_touch} ->
 %%            {pid, Pid} | {state, state_d()} | {data, Data} | {error, Error}.
-%% - wakeup event: {xlx, xl_wakeup}, To be tuned.
-%% - hibernate command: {xlx, xl_hibernate}, To be tuned.
-%% - stop command: {xlx, {stop, Reason}}, To be tuned.
-%% - state transition event: {xlx, {xl_leave, Vector}}, To be tuned.
+%% - wakeup event: xl_wakeup
+%% - hibernate command: xl_hibernate
+%% - stop command: {xl_stop, Reason}
+%% - state transition event: {xl_leave, Vector}
+%% - throw data for trace log: {xl_trace, Trace}
 
 %%--------------------------------------------------------------------
 %% Starts the server.
@@ -239,7 +237,7 @@ init(State) ->
     init_state(State).
 
 init_state(#{'_status' := running} = State) ->  % resume suspended state.
-    cast(self(), xl_wakeup),  % notify to prepare state resume.
+    self() ! xl_wakeup,  % notify to prepare state resume.
     {ok, State#{'_pid' => self()}};
 %% Initialize must-have attributes to the state.
 init_state(State) ->
@@ -266,7 +264,7 @@ init_state(State) ->
 preload(#{<<"_preload">> := Preload} = State) ->
     MakeActive = fun(Key, S) ->
                          case activate(Key, S) of
-                             {error, Error, S1} ->
+                             {error, Error, _S1} ->
                                  error({preload_failure, Error});
                              {_, _, S1} ->
                                  S1
@@ -287,15 +285,16 @@ enter(State) ->
     {ok, State}.
 
 %%--------------------------------------------------------------------
-%% States set is a map structure to keep state data, which is not only for FSMs
-%% but also for links. For FSMs, key of the state map must be tuple type.
+%% States set is a map structure to keep state data, which is not only
+%% for FSMs but also for links. For FSMs, key of the state map must be
+%% tuple type.
 %%
-%% Each FSM type active attribute has its own states set. To store all the
-%% FSMs' states sets in a single map, key of the map should contains
-%% information of FSM name, state name and directive to next state. So the
-%% key format may be {FsmName, StateName, Direction} or
-%% {FsmName, {StateName, Direction}}. I prefer to use the flat format rather
-%%  than the nest format.
+%% Each FSM type active attribute has its own states set. To store all
+%% the FSMs' states sets in a single map, key of the map should
+%% contains information of FSM name, state name and directive to next
+%% state. So the key format may be {FsmName, StateName, Direction} or
+%% {FsmName, {StateName, Direction}}. I prefer to use the flat format
+%% rather than the nest format.
 %%
 %% There are rules for states map:
 %% - Sign must not be tuple type.
@@ -311,17 +310,12 @@ next(#{<<"_name">> := Name}, Sign, States) ->
 next(Name, Sign, States) ->
     next_state({Name, Sign}, States).
 
-%% If first parameter is state data, return it without lookup.
-%% If there is no state data by key: {From, To}, try to find key: To.
-next_state(State, _) when is_map(State) ->
-    State;
-%% -spec states(vector()) -> state().
 next_state(Vector, {function, States}) ->
     States(Vector);
 next_state(Vector, {link, States, _}) ->
     %% Internal data structure of States actor is same as States map.
     %% touch operation may make a cache of #{{From, To} => state()} in States.
-    case call(States, {xl_touch, Vector}, Timeout) of
+    case call(States, {xl_touch, Vector}) of
         {data, Data} ->
             Data;
         _ ->
@@ -339,8 +333,12 @@ locate(Vector, States) ->
     end.
 
 %%--------------------------------------------------------------------
-%% Handling messages by relay to react function.
-%%--------------------------------------------------------------------
+%% Handling messages by relay to react function and default
+%% procedure. To be compatible with gen_server, handle_call or
+%% handl_cast callback decode messages to xl_sop formate:
+%% {'$gen_call', From, Command} => {xlx, From, [], Command},
+%% {'$gen_cast', Notification} => Notification.
+%% --------------------------------------------------------------------
 %% Handling sync call messages.
 -spec handle_call(term(), from(), state()) ->
                          {'reply', reply(), state()} |
@@ -351,12 +349,12 @@ handle_call(Request, From, State) ->
     handle_info({xlx, From, [], Request}, State).
 
 %% Handling async cast messages.
-%% {stop, Reason} is special notification to stop or transfer the state.
+%% {xl_stop, Reason} is special notification to stop or transfer the state.
 -spec handle_cast(Msg :: term(), state()) ->
                          {'noreply', state()} |
                          {stop, reason(), state()}.
 handle_cast(Message, State) ->
-    handle_info({xlx, Message}, State).
+    handle_info(Message, State).
 
 %% Handling customized messages.
 -spec handle_info(Info :: term(), state()) ->
@@ -376,8 +374,10 @@ normalize_msg({xlx, From, Command}) ->
 normalize_msg({xlx, {Pid, _} = From, Path, subscribe}) ->
     {xlx, From, Path, {subscribe, Pid}};
 %% gen_server timeout as hibernate command.
+normalize_msg(xl_stop) ->
+    {xl_stop, normal};
 normalize_msg(tiemout) ->
-    {xlx, xl_hibernate};
+    xl_hibernate;
 normalize_msg(Msg) ->
     Msg.
 
@@ -399,14 +399,14 @@ handle_1(_Info, Res) ->
     Res.
 
 %% Stop or hibernate may be canceled by state react with code error.
-handle_2({xlx, {stop, Reason}}, {ok, State}) ->
+handle_2({xl_stop, Reason}, {ok, State}) ->
     {stop, Reason, State};
-handle_2({xlx, {stop, Reason}}, {ok, _, State}) ->
+handle_2({xl_stop, Reason}, {ok, _, State}) ->
     {stop, Reason, State};
 %% Hibernate command, not guarantee.
-handle_2({xlx, xl_hibernate}, {ok, State}) ->
+handle_2(xl_hibernate, {ok, State}) ->
     {noreply, State, hibernate};
-handle_2({xlx, xl_hibernate}, {ok, _, State}) ->
+handle_2(xl_hibernate, {ok, _, State}) ->
     {noreply, State, hibernate};
 %% Reply is not here when code is noreply or stop
 handle_2({xlx, _From, _, _}, {noreply, State}) ->
@@ -444,11 +444,9 @@ handle_3(Result) ->
 %%--------------------------------------------------------------------
 %% Default message handler called when message is 'unhandled' by react function.
 %%--------------------------------------------------------------------
-%% State transition message. From is state data or name.
-default_react({xlx, {xl_leave, Vector}}, Fsm) ->
+%% State transition message. Vector :: state() | vector().
+default_react({xl_leave, Vector}, Fsm) ->
     transfer(Fsm, Vector);
-default_react({xlx, Info}, State) ->
-    recast(Info, State);
 default_react({xlx, _From, [], Command}, State) ->
     recall(Command, State);
 default_react({xlx, From, Path, Command}, State) ->
@@ -457,8 +455,8 @@ default_react({'DOWN', M, process, _, Reason}, State) ->
     handle_halt(M, Reason, State);
 default_react({'EXIT', Pid, Reason}, State) ->
     handle_halt(Pid, Reason, State);
-default_react(_Info, State) ->
-    {ok, State}.
+default_react(Info, State) ->
+    recast(Info, State).
 
 handle_halt(Id, Reason, #{'_monitors' := M} = State) ->
     case maps:find(Id, M) of
@@ -495,39 +493,44 @@ recall({delete, Key}, State) when is_atom(Key) ->
     {error, forbidden, State};
 recall({delete, Key}, State) ->
     delete(Key, State);
-%% Suberscribe and notify
+%% Suberscribe and notify.
+%% Notification for suberscriber is not same as system notification,
+%% that format is {xl_notify, Notification}.
 recall({subscribe, Pid}, State) ->
     Subs = maps:get('_subscribers', State, #{}),
     Mref = monitor(process, Pid),
     Subs1 = Subs#{Mref => Pid},
     {ok, Mref, State#{'_subscribers' => Subs1}};
-recall({unsubscribe, Mref}, #{'_subscribers' := Subs} = State) ->
-    demonitor(Mref, [flush]),
-    Subs1 = maps:remove(Mref, Subs),
-    {ok, done, State#{'_subscribers' := Subs1}};
+%% Unsubscribe operation may be triggered by request or notification
+%% with different message format: {xlx, From, Path, {unsubscribe,
+%% Ref}} vs {xl_unsubscribe, Ref}.
+recall({unsubscribe, Ref}, State) ->
+    {ok, NewState} = recast({xl_unsubscribe, Ref}, State),
+    {ok, done, NewState};
 recall(_, State) ->
     {error, unknown, State}.
 
-recast({notify, Info}, #{'_subscribers' := Subs} = State) ->
+recast({xl_notify, Info}, #{'_subscribers' := Subs} = State) ->
     maps:fold(fun(M, P, A) ->
                       catch P ! {M, Info},
                       A
               end, 0, Subs),
     {ok, State};
-recast({unsubscribe, _} = Unsub, State) ->
-    {ok, done, NewState} = recall(Unsub, State),
-    {ok, NewState};
+recast({xl_unsubscribe, Ref}, #{'_subscribers' := Subs} = State) ->
+    demonitor(Ref, [flush]),
+    Subs1 = maps:remove(Ref, Subs),
+    {ok, State#{'_subscribers' := Subs1}};
 recast(_Info, State) ->
     {ok, State}.
 
-%%--------------------------------------------------------------------
-%% FSM state transition functions.
-%%--------------------------------------------------------------------
+%% FSM state transition functions. If FSM process crashed, the state
+%% data has no time to output. If state process would not output all
+%% state data, output {xl_transfer, {Surname, Name, Sign} instead.
 transfer(Fsm, #{'_sign' := Sign} = State) ->
     transfer(Fsm, State, Sign);
-transfer(Fsm, {From, To}) ->
+transfer(Fsm, {From, To}) ->                    % From :: state() | Name
     transfer(Fsm, From, To);
-transfer(Fsm, To) ->
+transfer(Fsm, To) ->                            % To :: vector().
     transfer(Fsm, undefined, To).
 
 transfer(#{'_step' := Step} = Fsm, From, To) ->
@@ -547,7 +550,7 @@ t1(#{'_states' := States} = Fsm, From, To) ->
             {stop, normal, Fsm};
         Next ->
             F = unlink('_state', Fsm),
-            {pid, _, F1} = activate(undefined, '_state', Next, F),
+            {pid, _, F1} = activate('_state', Next, F),
             {ok, F1}
     catch
         error: _BadKey when To =:= exception ->
@@ -577,7 +580,7 @@ archive(#{'_traces' := {function, Traces}} = Fsm, Trace) ->
     Traces(Fsm, Trace);
 archive(#{'_traces' := {link, Traces, _}} = Fsm, Trace) ->
     Timeout = maps:get('_timeout', Fsm),
-    call(Traces, {xlx_trace, Trace}, Timeout),
+    call(Traces, {xl_trace, Trace}, Timeout),
     Fsm;
 archive(#{'_traces' := Traces, '_max_traces' := Limit} = Fsm, Trace)  ->
     Traces1 = enqueue(Trace, Traces, Limit),
@@ -673,7 +676,7 @@ leave(State) ->
 
 notify_subscribers(#{'_subscribers' := Subs} = State, Info) ->
     maps:fold(fun(Mref, Pid, Acc) ->
-                      catch Pid ! {Mref, Info},
+                      notify(Pid, {Mref, Info}),
                       demonitor(Mref, [flush]),
                       Acc
               end, 0, Subs),
@@ -684,7 +687,7 @@ notify_subscribers(State, _) ->
 notify_fsm(#{'_parent' := Fsm} = State, Sign) ->
     case is_process_alive(Fsm) of
         true ->
-            cast(Fsm, {xl_leave, {State, Sign}}),
+            Fsm ! {xl_leave, {State, Sign}},
             flush_and_relay(Fsm),
             ok;
         false ->
@@ -780,12 +783,6 @@ call(Process, Command, Path, Timeout) ->
             {error, timeout}
     end.
 
-%% Same as gen_server:cast(). cast not support path, which is not traceable.
--spec cast(process(), Notify :: term()) -> 'ok'.
-cast(Process, Notification) ->
-    catch Process ! {xlx, Notification},
-    ok.
-
 %% stop is almost same effect as gen_server:stop().
 -spec stop(process()) -> output().
 stop(Process) ->
@@ -798,7 +795,7 @@ stop(Process, Reason) ->
 -spec stop(process(), reason(), timeout()) -> output().
 stop(Process, Reason, Timeout) ->
     Mref = monitor(process, Process),
-    cast(Process, {stopped, Reason}),
+    Process ! {xl_stop, Reason},
     receive
         {xlx, {xl_leave, Result}} ->
             demonitor(Mref, [flush]),
@@ -821,15 +818,13 @@ subscribe(Process, Pid) ->
 
 -spec unsubscribe(process(), reference()) -> 'ok'.
 unsubscribe(Process, Ref) ->
-    cast(Process, {unsubscribe, Ref}).
+    catch Process ! {xl_unsubscribe, Ref},
+    ok.
 
 -spec notify(process(), Info :: term()) -> 'ok'.
 notify(Process, Info) ->
-    cast(Process, {notify, Info}).
-
--spec notify(process(), Tag :: term(), Info :: term()) -> 'ok'.
-notify(Process, Tag, Info) ->
-    cast(Process, {notify, {Tag, Info}}).
+    catch Process ! {xl_notify, Info},
+    ok.
 
 %%--------------------------------------------------------------------
 %% Helper functions for active attribute access.
@@ -1013,7 +1008,7 @@ unlink(Key, #{'_monitors' := M} = State) ->
         {ok, {link, Pid, local}} ->
             unlink(Pid),
             M1 = maps:remove(Pid, M),
-            cast(Pid, {stop, update}),
+            catch Pid ! {xl_stop, update},
             State#{'_monitors' := M1};
         {ok, {link, _, Monitor}} ->
             demonitor(Monitor, [flush]),
