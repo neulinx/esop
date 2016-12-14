@@ -28,17 +28,50 @@
 
 -define(DFL_TIMEOUT, 4000).  %% Smaller than gen:call timeout.
 -define(MAX_TRACES, 1000).  %% Default trace log limit.
+%% Pick the special attributes as summary send to FSM process.
+-define(SUMERRY, ['_output', '_surname', <<"_name">>, '_sign', '_reason',
+                  '_step', '_entry_time', '_exit_time']).
 
-%%%===================================================================
-%%% Common types
-%%%===================================================================
--export_type([from/0,
-              tag/0,
-              state/0,
-              result/0,
-              reply/0,
-              output/0]).
- 
+%%%-------------------------------------------------------------------
+%%% Types specifications for documentation.
+%%%
+%%% Type of state() is map now, while the old version is record. State
+%%% data has two parts: header and body. Header part is runtime data
+%%% of state machine. Body part is original data load from persistent
+%%% layer. Some attributes of header are convert from same name
+%%% attribute (different type). According to aesthetics, header and
+%%% body are in same level of a plain and flat data structure. The
+%%% distinguish is keys names of header have prefix '_'.
+%%% -------------------------------------------------------------------
+-type state() :: #{      % header
+             '_entry' => entry(),
+             '_react' => react(),
+             '_exit' => exit(),
+             '_actions' => actions(),
+             '_pid' => pid(),
+             '_parent' => pid(),
+             '_surname' => tag(),
+             '_reason' => reason(),
+             '_status' => status(),
+             '_sign' => tag(),
+             '_subscribers' => map(),
+             '_entry_time' => pos_integer(),
+             '_exit_time' => pos_integer(),
+             '_step' => non_neg_integer(),
+             '_states' => active_key() | states_map() | links_map(),
+             '_monitors' => monitors(),
+             '_input' => term(),
+             '_output' => term()
+%             <<"_name">> => tag(),
+%             <<"_recovery">> => recovery(),
+%             <<"_max_steps">> => limit(),
+%             <<"_max_retry">> => limit(),
+%             <<"_retry_count">> => non_neg_integer(),
+%             <<"_retry_interval">> => non_neg_integer(),
+%             <<"_timeout">> => timeout(),  % default: 5000
+%             <<"_hibernate">> => timeout()  % mandatory, default: infinity
+            } | map().    % Body
+
 -type server_name() :: {local, atom()} |
                        {global, atom()} |
                        {via, atom(), term()}.
@@ -48,38 +81,6 @@
 -type start_opt() ::
         {'timeout', Time :: timeout()} |
         {'spawn_opt', [proc_lib:spawn_option()]}.
-%% @todo write document for state/FSM/actor attributes.
-%% - Runtime attributes names is atom type with prefix '_'.
-%% - Raw data (json => map) should not contain atom type or tuple type data. 
--type state() :: #{
-%%---------- state base attributes --------
-             '_entry' => entry(),
-             '_react' => react(),
-             '_exit' => exit(),
-             '_pid' => pid(),
-             '_parent' => pid(),
-             '_surname' => tag(),
-             '_reason' => reason(),
-             '_status' => status(),
-             '_sign' => tag(),
-             '_recovery' => recovery(),
-             '_subscribers' => map(),
-             '_entry_time' => pos_integer(),
-             '_exit_time' => pos_integer(),
-             '_states' => active_key() | states_map() | links_map(),
-             '_monitors' => monitors()
-%%---------- Customized attributes --------
-%             <<"_max_steps">> => limit(),
-%             <<"_recovery">> => recovery(),
-%             <<"_max_retry">> => limit(),
-%             <<"_retry_count">> => non_neg_integer(),
-%             <<"_retry_interval">> => non_neg_integer()
-%             <<"_name">> => name(),
-%             <<"behavior">> => behavior(),
-%             <<"_timeout">> => timeout(),  % default: 5000
-%             <<"_hibernate">> => timeout()  % mandatory, default: infinity
-            } | map().
-
 -type monitor() :: {tag(), recovery()}.
 -type monitors() :: #{process() | reference() => monitor()}.
 -type active_key() :: {'link', process(), non_neg_integer() | reference()} |
@@ -138,7 +139,7 @@
 
 %%--------------------------------------------------------------------
 %% Messages format.
-%%--------------------------------------------------------------------
+%% 
 %% System message format.
 %% - normal: {xlx, From, Command} -> {Code, Result} | {error, Error}.
 %% - traverse with path: {xlx, From, Path, Command} -> result().
@@ -149,6 +150,13 @@
 %% - stop command: {xl_stop, Reason}
 %% - state transition event: {xl_leave, Vector}
 %% - throw data for trace log: {xl_trace, Trace}
+%%--------------------------------------------------------------------
+%% Predefined signs. Generally, all internal signs are atom type.
+%% - exceed_max_steps: run out of steps limit.
+%% - 
+%% 
+%%--------------------------------------------------------------------
+
 
 %%--------------------------------------------------------------------
 %% Starts the server.
@@ -302,14 +310,6 @@ enter(State) ->
 %% - If {Name, Sign} is not found, then try {Sign}.
 %% - If it is not found at last, throw excepion rather than return error.
 %%--------------------------------------------------------------------
-%% Helper function to gather information for .
-next(#{'_surname' := Key, <<"_name">> := Name}, Sign, States) ->
-    next_state({Key, Name, Sign}, States);
-next(#{<<"_name">> := Name}, Sign, States) ->
-    next_state({Name, Sign}, States);
-next(Name, Sign, States) ->
-    next_state({Name, Sign}, States).
-
 next_state(Vector, {function, States}) ->
     States(Vector);
 next_state(Vector, {link, States, _}) ->
@@ -442,8 +442,9 @@ handle_3(Result) ->
     Result.
 
 %%--------------------------------------------------------------------
-%% Default message handler called when message is 'unhandled' by react function.
-%%--------------------------------------------------------------------
+%% Default message handler called when message is 'unhandled' by react
+%% function.
+%% --------------------------------------------------------------------
 %% State transition message. Vector :: state() | vector().
 default_react({xl_leave, Vector}, Fsm) ->
     transfer(Fsm, Vector);
@@ -526,26 +527,29 @@ recast(_Info, State) ->
 %% FSM state transition functions. If FSM process crashed, the state
 %% data has no time to output. If state process would not output all
 %% state data, output {xl_transfer, {Surname, Name, Sign} instead.
-transfer(Fsm, #{'_sign' := Sign} = State) ->
-    transfer(Fsm, State, Sign);
+transfer(Fsm, #{'_surname' := Key,
+                '_name' := StateName,
+                '_sign' := Sign} = State) ->
+    transfer(Fsm, State, {Key, StateName, Sign});
 transfer(Fsm, {From, To}) ->                    % From :: state() | Name
     transfer(Fsm, From, To);
 transfer(Fsm, To) ->                            % To :: vector().
     transfer(Fsm, undefined, To).
 
-transfer(#{'_step' := Step} = Fsm, From, To) ->
-    Fsm1 = archive(Fsm, {From, To}),
+transfer(Fsm, From, {Key, StateName, Sign} = To) ->
+    Fsm1 = archive(Fsm, From, To),
+    {link, _, Step} = maps:get(Fsm1),
     Res = case maps:find(<<"_max_steps">>, Fsm1) of
               {ok, MaxSteps} when Step >= MaxSteps ->
-                  t1(Fsm1#{'_reason' => out_of_steps}, From, exception);
+                  t1(Step, Fsm1, {Key, StateName, exceed_max_steps});
               _ ->
-                  t1(Fsm1#{'_step' := Step + 1}, From, To)
+                  t1(Step + 1, Fsm1, To)
           end,
     t2(Res, From, To).
 
-t1(#{'_states' := States} = Fsm, From, To) ->
+t1(Step, #{'_states' := States} = Fsm, From, To) ->
     %% You can provide your own cutomized exception and stop state.
-    try next(From, To, States) of
+    try next_state(To, States) of
         stop ->
             {stop, normal, Fsm};
         Next ->
