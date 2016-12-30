@@ -1,13 +1,13 @@
 {application, xl_sop,
  [{description, "State-oriented programming framework."},
-  {vsn, "0.5.0"},
+  {vsn, "1.0.0"},
   {registered, []},
   {applications,
    [kernel,
     stdlib
    ]},
   {env,[]},
-  {modules, [xl_actor]},
+  {modules, [xl]},
 
   {maintainers, []},
   {licenses, []},
