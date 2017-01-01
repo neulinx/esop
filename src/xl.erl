@@ -1,11 +1,11 @@
-%%-------------------------------------------------------------------
-%% @author Gary Hai <gary@XL59.com>
-%% @copyright (C) 2016, Neulinx Platforms.
-%% @doc
-%%  Trinitiy of State, FSM, Actor, with gen_server behaviours.
-%% @end
-%% Created : 27 Apr 2016 by Gary Hai <gary@XL59.com>
-%%-------------------------------------------------------------------
+%%%-------------------------------------------------------------------
+%%% @author Gary Hai <gary@XL59.com>
+%%% @copyright (C) 2016, Neulinx Platforms.
+%%% @doc
+%%%  Trinitiy of State, FSM, Actor, with gen_server behaviours.
+%%% @end
+%%% Created : 27 Apr 2016 by Gary Hai <gary@XL59.com>
+%%%-------------------------------------------------------------------
 -module(xl).
 
 %% Support inline unit test for EUnit.
@@ -26,9 +26,9 @@
 -export([subscribe/1, subscribe/2, unsubscribe/2, notify/2]).
 -export([get/2, get_raw/2, get_all/1, put/3, delete/2, delete/3]).
 
-%%-------------------------------------------------------------------
+%% -------------------------------------------------------------------
 %% Macro definitions for default value. 
-%%-------------------------------------------------------------------
+%% -------------------------------------------------------------------
 %% Default timeout value of gen_server:call() is 5000ms. So we choose
 %% 4000 ms as default timeout value, is smaller than 5000ms
 -define(DFL_TIMEOUT, 4000).
@@ -42,7 +42,7 @@
 %% processes.
 -define(RETRY_INTERVAL, 0).
 
-%%-------------------------------------------------------------------
+%% -------------------------------------------------------------------
 %% Types specifications.
 %% 
 %% Type of state() is map now, while the old version is record. State
@@ -84,6 +84,15 @@
 %% specifications. All binary type attribute names are commented and
 %% binary string are replaced by tag() type currently.
 %% -------------------------------------------------------------------
+%% Common types exported for reuse.
+-export_type([state/0,
+              process/0,
+              from/0,
+              path/0,
+              tag/0,
+              message/0,
+              reply/0]).
+%% State attributes.
 -type state() :: #{
              '_entry' => entry(),
              '_react' => react(),
@@ -173,7 +182,8 @@
                   'stop' |
                   'halt' |
                   'exception' |
-                  'failover'.
+                  'failover' |
+                  tag().
 -type reason() :: 'normal' | 'shutdown' | {'shutdown', term()} | term().
 %% In state, '_sign' may be relative as tag() type or absolute as
 %% vector() type.
@@ -208,7 +218,7 @@
 %% Quit or keep running after FSM stop. Default value is <<"quit">>.
 %% -type aftermath() :: <<"quit">> | <<"halt">>.
 
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% Message format:
 %% 
 %% - normal: {xlx, From, Command} -> reply().
@@ -231,11 +241,11 @@
 %% - stop: machine stop and process exit.
 %% - halt: machine stop but process is still alive.
 %% - abort: FSM is not finished, exit by exception or command.
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% gen_server callbacks.
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% Notice: process flag of state is trap_exit, should handle 'EXIT'
 %% signal by itself.
 -spec init(state()) -> {'ok', state()} | {'stop', reason()}.
@@ -297,7 +307,7 @@ terminate(Reason, State) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% Starts the server.
 %% 
 %% start/3 or start_link/3 spawn actor with local or global name. If
@@ -306,7 +316,7 @@ code_change(_OldVsn, State, _Extra) ->
 %% 
 %% Value of <<"_timeout">> attribute will affect the entire life
 %% cycle of this actor, include init function and request response.
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 -spec start_link(state()) -> start_ret().
 start_link(State) ->
     start_link(State, []).
@@ -347,7 +357,7 @@ merge_options(Options, #{<<"_timeout">> := Timeout}) ->
 merge_options(Options, _) ->
     Options.
 
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% Create state object from module and given parameters.  If there is
 %% an exported function create/1 in the module, create new state
 %% object by it instead.
@@ -393,9 +403,9 @@ create(Module, Data) when is_map(Data) ->
 create(Module, Data) when is_list(Data) ->
     create(Module, maps:from_list(Data)).
 
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% API for invocation by message wrapping.
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% Same as gen_server:reply().
 -spec reply(from(), Reply :: term()) -> 'ok'.
 reply({To, Tag}, Reply) ->
@@ -498,9 +508,9 @@ notify(Process, Info) ->
     catch Process ! {xl_notify, Info},
     ok.
 
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% API for internal data access.
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% Request of 'get' is default to fetch all data (without internal
 %% attributes).
 -spec get(tag(), state()) -> {'ok', term(), state()} |
@@ -592,13 +602,13 @@ unlink(Key, #{'_monitors' := M} = State, Stop) ->
             State
     end.
 
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% gen_server callbacks. Initializes the server with state action
 %% entry. The order of initialization is: [initialize runtime
 %% attributes] -> [call '_entry' action] -> [preload depended actors]
 %% -> [if it is FSM, start it]. The '_entry' action may affect
 %% follow-up steps.
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% '_entry' action of state may be ignored if state is loaded from
 %% suspended state (by '_status' attribute) because it is already
 %% initialized.
@@ -668,7 +678,7 @@ preload(#{<<"_preload">> := Preload} = State) ->
 preload(State) ->
     State.
 
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% Initialize and launch FSM.
 %% 
 %% Flag of FSM is existence of the attribute named _state.  Specially,
@@ -681,7 +691,7 @@ preload(State) ->
 %% <<"sign">> := Sign}, where Sign must be present and be list format.
 %% Note that the raw data does not support the tuple type. Raw data
 %% vector in list type may convert to tuple type at first.
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% Pre-spawned state as an introducer.
 init_fsm(#{'_state' := {link, _, _}} = Fsm) ->
     {ok, Fsm};
@@ -700,7 +710,7 @@ init_fsm(#{<<"_state">> := Map} = Fsm) ->
 init_fsm(State) ->
     {ok, State}.
 
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% States is map or active attribute to keep state data, which is not
 %% only for FSMs but also for links. For FSMs, key of the state map
 %% must be tuple type, which is form of {Vertex, Edge} as a vector of
@@ -711,7 +721,7 @@ init_fsm(State) ->
 %% - Sign must not be tuple type.
 %% - If {FromState, ToSign} is not found, then try {ToSign}.
 %% - If it is not found at last, throw excepion rather than return error.
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 next_state(Vector, States, Fsm) when not is_tuple(Vector) ->
     next_state({Vector}, States, Fsm);
 next_state(Vector, {function, States}, Fsm) ->
@@ -741,10 +751,10 @@ locate(Vector, States) ->
             locate({Global}, States)
     end.
 
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% Handling messages by relay to react function and default
 %% procedure. 
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% Empty path, the last hop.
 normalize_msg({xlx, From, Command}) ->
     {xlx, From, [], Command};
@@ -821,7 +831,7 @@ handle_3({noreply, #{<<"_hibernate">> := Timeout} = S}) ->
 handle_3(Result) ->
     Result.
 
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% Default handlers for messages are 'unhandled'
 %%
 %% Special cases for FSM type actor:
@@ -979,7 +989,7 @@ recast(Info, #{'_state' := {link, Pid, _}} = Fsm) ->
 recast(_Info, State) ->
     {ok, State}.
 
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% FSM state transition functions.
 %%
 %% xl_leave is a notification of format {xl_leave, Output}, where
@@ -1096,7 +1106,7 @@ extract_sign({_, Sign}) ->
 extract_sign(Sign) ->
     Sign.
 
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% Failover and recovery.
 %% --------------------------------------------------------------------
 %% '_retry_count' is lifetime count of all failover. The retry count
@@ -1182,12 +1192,12 @@ enqueue(Item, Queue, infinity) ->
 enqueue(Item, Queue, Limit) ->
     lists:sublist([Item | Queue], Limit).
 
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% Process messages with path, when react function does not handle it.
 %%
 %% Hierarchical data in a state data map can only support
 %% get/put/delete operations.
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 traverse(_, [Key], get, State) ->
     recall({get, Key}, State);
 traverse(_, [Key], {put, Value}, State) ->
@@ -1237,9 +1247,9 @@ iterate(Command, [Key | Path], Container) ->
             {error, badarg}
     end.
 
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% Terminating and submit final report.
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 try_exit(#{'_exit' := Exit} = State) ->
     Exit(State);
 try_exit(State) ->
@@ -1363,9 +1373,9 @@ flush_and_relay(Pid) ->
             true
     end.
 
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% Helper functions for active attribute access.
-%%--------------------------------------------------------------------
+%% --------------------------------------------------------------------
 %% Data types of attributes:
 %% {link, pid(), identifier()} |
 %%   {state, {state(), actions()}} | {state, state()} | Value :: term().
