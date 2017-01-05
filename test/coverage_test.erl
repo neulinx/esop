@@ -63,7 +63,6 @@ coverage() ->
     F2 = fun(S) -> {ok, S, 1} end,
 
     {ok, P6} = xl:start(#{'_entry' => F2, b => 2}),
-    timer:sleep(5),
     {ok, 2} = xl:call(P6, {get, b}),
     {stopped, normal} = xl:stop(P6),
 
@@ -149,7 +148,7 @@ coverage() ->
 
     {ok, P14} = xl:start(#{'_react' => F5, <<"_hibernate">> => 10}),
     {error, unknown} = gen_server:call(P14, hello),
-    ok = gen_server:cast(P14, {xl_leave, test}),
+    ok = gen_server:cast(P14, {xl_leave, undefined, test}),
     ok = gen_server:cast(P14, {test, self()}),
     receive
         ok ->
@@ -250,16 +249,16 @@ coverage() ->
     end,
 
     F21 = fun(#{'_parent' := Fsm, '_input' := 1} = State) ->
-                  Fsm ! {xl_leave, {2, {start}}},
+                  Fsm ! {xl_leave, undefined, {2, {start}}},
                   State#{'_report' := false};
              (#{'_parent' := Fsm, '_input' := 2} = State) ->
-                  Fsm ! {xl_leave, {3, exception}},
+                  Fsm ! {xl_leave, undefined, {3, exception}},
                   State#{'_report' := false};
              (#{'_parent' := Fsm, '_input' := 3} = State) ->
-                  Fsm ! {xl_leave, {4, {exception}}},
+                  Fsm ! {xl_leave, undefined, {4, {exception}}},
                   State#{'_report' := false};
              (#{'_parent' := Fsm, '_input' := 4} = State) ->
-                  Fsm ! {xl_leave, #{'_sign' => {exception}}},
+                  Fsm ! {xl_leave, undefined, #{'_sign' => {exception}}},
                   State#{'_report' := false}
           end,
     S21 = #{'_exit' => F21},

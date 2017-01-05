@@ -223,12 +223,13 @@
 %% 
 %% - normal: {xlx, From, Command} -> reply().
 %% - traverse with path: {xlx, From, Path, Command} -> reply().
-%% - touch & activate command: {xlx, From, xl_touch} ->
+%% - touch & activate command: {xlx, from(), xl_touch} ->
 %%           {process, Pid} | {state, state_d()} | {data, Data} | {error, Error}.
 %% - wakeup event: xl_wakeup
 %% - hibernate command: xl_hibernate
 %% - stop command: xl_stop | {xl_stop, reason()}
-%% - state transition event: {xl_leave, state() | {Output, vector()}}
+%% - state transition event: {xl_leave, Pid, state() | {Output, vector()}},
+%%   ACK: {ok, xl_leave_ack} reply to from Pid.
 %% - post data package for trace log:
 %%           {xl_trace, {log, Trace} | {backtrack, Back}}
 %% - failover retry event: {xl_retry, recovery()} |  % for FSM
@@ -478,7 +479,8 @@ stop_(Process, Reason, Timeout) ->
     Mref = monitor(process, Process),
     Process ! {xl_stop, Reason},
     receive
-        {xl_leave, Result} ->
+        {xl_leave, From, Result} ->
+            catch From ! {ok, xl_leave_ack},
             demonitor(Mref, [flush]),
             {ok, Result};
         {'DOWN', Mref, _, _, Result} ->
@@ -867,10 +869,12 @@ default_react({xl_retry, Recovery}, #{'_status' := failover} = Fsm) ->
 default_react({xlx, _From, [<<".">>], Command}, State) ->
     recall(Command, State);
 %% State transition message. Output :: state() | {term(), vector()}.
-default_react({xl_leave, Output}, #{'_state' := _} = Fsm) ->
+default_react({xl_leave, From, Output}, #{'_state' := _} = Fsm) ->
+    catch From ! {ok, xl_leave_ack},
     transfer(Fsm, Output);
 %% Drop transition message if this actor is not FSM.
-default_react({xl_leave, _}, State) ->
+default_react({xl_leave, From, _}, State) ->
+    catch From ! {ok, xl_leave_ack},
     {noreply, State};
 %% FSM type actor relay messages without path to state process.
 default_react({xlx, _From, [], _} = Request,
@@ -1339,11 +1343,11 @@ report(Supervisor, undefined, State) ->
     Report = make_report(Detail, State),
     report(Supervisor, Report, State);
 report(Supervisor, Report, #{'_of_fsm' := true} = State) ->
-    Supervisor ! {xl_leave, Report},
+    Supervisor ! {xl_leave, self(), Report},
     flush_and_relay(Supervisor),
     State;
 report(Supervisor, Report, State) ->
-    Supervisor ! {xl_leave, Report},
+    Supervisor ! {xl_leave, undefined, Report},
     State.
 
 %% Selective report.
@@ -1361,7 +1365,12 @@ make_report(Selections, State) ->
 
 %% flush system messages and reply application messages.
 flush_and_relay(Pid) ->
+    flush_and_relay(Pid, ?DFL_TIMEOUT).
+
+flush_and_relay(Pid, Timeout) ->
     receive
+        {ok, xl_leave_ack} ->
+            flush_and_relay(Pid, 0);
         {'DOWN', _, _, _, _} ->
             flush_and_relay(Pid);
         {'EXIT', _, _} ->
@@ -1369,7 +1378,7 @@ flush_and_relay(Pid) ->
         Message ->
             Pid ! Message,
             flush_and_relay(Pid)
-    after 0 ->
+    after Timeout ->
             true
     end.
 
