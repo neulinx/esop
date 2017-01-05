@@ -77,7 +77,7 @@ coverage() ->
     L1 = #{'_state' => {process, P7}},
     {ok, P8} = xl:start(#{'_states' => L1,
                           <<"_preload">> => ['_state']}),
-    {ok, R2} = xl:call([P8, <<".">>], {subscribe, self()}),
+    {ok, R2} = xl:subscribe([P8, <<".">>]),
     {ok, done} = gen_server:call(P7, {xl_stop, normal}),
     receive
         {R2, _} ->
@@ -242,7 +242,7 @@ coverage() ->
             <<"_max_traces">> => 0,
             '_state' => {[], start}},
     {ok, P20} = xl:start(M20),
-    {ok, R20} = xl:call([P20, <<".">>], {subscribe, self()}),
+    {ok, R20} = xl:subscribe([P20, <<".">>]),
     {ok, done} = xl:call(P20, xl_stop),
     receive
         {R20, _} ->

@@ -489,15 +489,15 @@ stop_(Process, Reason, Timeout) ->
             {error, timeout}
     end.
 
--spec subscribe(process()) -> {'ok', reference()}.
+-spec subscribe(process() | path()) -> {'ok', reference()}.
 subscribe(Process) ->
     subscribe(Process, self()).
 
--spec subscribe(process(), process()) -> {'ok', reference()}.
+-spec subscribe(process() | path(), process()) -> {'ok', reference()}.
 subscribe(Process, Pid) ->
     call(Process, {subscribe, Pid}).
 
--spec unsubscribe(process(), reference()) -> 'ok'.
+-spec unsubscribe(process() | path(), reference()) -> 'ok'.
 unsubscribe(Process, Ref) ->
     catch Process ! {xl_unsubscribe, Ref},
     ok.
