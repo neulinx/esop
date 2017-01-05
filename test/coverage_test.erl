@@ -63,7 +63,6 @@ coverage() ->
     F2 = fun(S) -> {ok, S, 1} end,
 
     {ok, P6} = xl:start(#{'_entry' => F2, b => 2}),
-    timer:sleep(5),
     {ok, 2} = xl:call(P6, {get, b}),
     {stopped, normal} = xl:stop(P6),
 
@@ -77,14 +76,14 @@ coverage() ->
     L1 = #{'_state' => {process, P7}},
     {ok, P8} = xl:start(#{'_states' => L1,
                           <<"_preload">> => ['_state']}),
-    {ok, R2} = xl:call([P8, <<".">>], {subscribe, self()}),
+    {ok, R2} = xl:subscribe([P8, <<".">>]),
     {ok, done} = gen_server:call(P7, {xl_stop, normal}),
     receive
         {R2, _} ->
             ok
     end,
 
-    M1 = #{'_entry' => F2, '_state' => {data, {[], start}}},
+    M1 = #{'_entry' => F2, '_state' => {start}},
     {error, normal} = xl:start(M1),
 
     M2 = #{'_states' => {state, #{}}, '_state' => {data, {[], start}}},
@@ -149,7 +148,7 @@ coverage() ->
 
     {ok, P14} = xl:start(#{'_react' => F5, <<"_hibernate">> => 10}),
     {error, unknown} = gen_server:call(P14, hello),
-    ok = gen_server:cast(P14, {xl_leave, test}),
+    ok = gen_server:cast(P14, {xl_leave, undefined, test}),
     ok = gen_server:cast(P14, {test, self()}),
     receive
         ok ->
@@ -242,7 +241,7 @@ coverage() ->
             <<"_max_traces">> => 0,
             '_state' => {[], start}},
     {ok, P20} = xl:start(M20),
-    {ok, R20} = xl:call([P20, <<".">>], {subscribe, self()}),
+    {ok, R20} = xl:subscribe([P20, <<".">>]),
     {ok, done} = xl:call(P20, xl_stop),
     receive
         {R20, _} ->
@@ -250,16 +249,16 @@ coverage() ->
     end,
 
     F21 = fun(#{'_parent' := Fsm, '_input' := 1} = State) ->
-                  Fsm ! {xl_leave, {2, {start}}},
+                  Fsm ! {xl_leave, undefined, {2, {start}}},
                   State#{'_report' := false};
              (#{'_parent' := Fsm, '_input' := 2} = State) ->
-                  Fsm ! {xl_leave, {3, exception}},
+                  Fsm ! {xl_leave, undefined, {3, exception}},
                   State#{'_report' := false};
              (#{'_parent' := Fsm, '_input' := 3} = State) ->
-                  Fsm ! {xl_leave, {4, {exception}}},
+                  Fsm ! {xl_leave, undefined, {4, {exception}}},
                   State#{'_report' := false};
              (#{'_parent' := Fsm, '_input' := 4} = State) ->
-                  Fsm ! {xl_leave, #{'_sign' => {exception}}},
+                  Fsm ! {xl_leave, undefined, #{'_sign' => {exception}}},
                   State#{'_report' := false}
           end,
     S21 = #{'_exit' => F21},
@@ -382,13 +381,15 @@ coverage() ->
             y => {ref, s37, b},
             z => {ref, ss, c},
             a => {a, b, c},
+            b => {a, b},
             s37 => {data, S37},
             register => {function, F39}},
     {ok, P39} = xl:start(#{'_states' => L39}),
     {ok, y} = xl:call(P39, {get, x}),
     {ok, 2} = xl:call(P39, {get, y}),
     {error, undefined} = xl:call(P39, {get, z}),
-    {error, badarg} = xl:call(P39, {get, a}),
+    {ok, {a, b, c}} = xl:call(P39, {get, a}),
+    {a, b} = xl:call(P39, {get, b}),
     {stopped, normal} = xl:stop(P39),
 
     F40 = fun({get, Key}, S) ->

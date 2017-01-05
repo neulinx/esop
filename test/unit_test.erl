@@ -171,7 +171,7 @@ test4() ->
     {ok, {raw, realm}} = xl:call([R, f], {get, name}),
     {ok, {raw, realm}} = xl:call([R, 2], {get, name}),
     {ok, done} = xl:call(R, {delete, 2}),
-    {ok, M1} = xl:call([R, "a1", "a2", "a3"], {subscribe, self()}),
+    {ok, M1} = xl:subscribe([R, "a1", "a2", "a3"]),
     {stopped, normal} = xl:stop(R),
     {M1, {exit, #{'_output' := a3_test}}} = receive
                                                 Notify ->
@@ -324,7 +324,7 @@ test7() ->
     {ok, c} = xl:call(F1, {get, <<"_name">>}),
     {ok, 12} = xl:call([F1, <<".">>], {get, '_step'}),
     {ok, 4} = xl:call([F1, <<".">>], {get, '_retry_count'}),
-    {ok, Ref1} = xl:call([F1, <<".">>], {subscribe, self()}),
+    {ok, Ref1} = xl:subscribe([F1, <<".">>]),
     %% Traces = xl:call(F1, {get, '_traces'}, [<<".">>]),
     %% ?debugVal(Traces),
     xl:cast(F1, crash),  % => exceed max retry count
