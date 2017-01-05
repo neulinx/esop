@@ -83,7 +83,7 @@ coverage() ->
             ok
     end,
 
-    M1 = #{'_entry' => F2, '_state' => {data, {[], start}}},
+    M1 = #{'_entry' => F2, '_state' => {start}},
     {error, normal} = xl:start(M1),
 
     M2 = #{'_states' => {state, #{}}, '_state' => {data, {[], start}}},
@@ -381,13 +381,15 @@ coverage() ->
             y => {ref, s37, b},
             z => {ref, ss, c},
             a => {a, b, c},
+            b => {a, b},
             s37 => {data, S37},
             register => {function, F39}},
     {ok, P39} = xl:start(#{'_states' => L39}),
     {ok, y} = xl:call(P39, {get, x}),
     {ok, 2} = xl:call(P39, {get, y}),
     {error, undefined} = xl:call(P39, {get, z}),
-    {error, badarg} = xl:call(P39, {get, a}),
+    {ok, {a, b, c}} = xl:call(P39, {get, a}),
+    {a, b} = xl:call(P39, {get, b}),
     {stopped, normal} = xl:stop(P39),
 
     F40 = fun({get, Key}, S) ->

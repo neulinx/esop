@@ -116,13 +116,13 @@
              '_of_fsm' => 'true' | 'false', % default false.
              %% Wether to submit report to parent process.
              '_report' => 'true' | 'false', % default true.
+%             <<"_report">> => <<"all">> | <<"default">> | list(),
              '_sign' => sign(),
              '_step' => non_neg_integer(),
              '_traces' => active_key() | map(),
              '_retry_count' => non_neg_integer(),
              '_pending_queue' => list()
 %% Runtime data with binary type names.
-%             <<"_report">> => <<"all">> | <<"default">> | list(),
 %             <<"_max_pending_size">> => limit(),
 %             <<"_aftermath">> => aftermath(),
 %             <<"_recovery">> => recovery(),
@@ -224,7 +224,7 @@
 %% - normal: {xlx, From, Command} -> reply().
 %% - traverse with path: {xlx, From, Path, Command} -> reply().
 %% - touch & activate command: {xlx, from(), xl_touch} ->
-%%           {process, Pid} | {state, state_d()} | {data, Data} | {error, Error}.
+%%     {process, Pid} | {state, state_d()} | {data, Data} | {error, Error}.
 %% - wakeup event: xl_wakeup
 %% - hibernate command: xl_hibernate
 %% - stop command: xl_stop | {xl_stop, reason()}
@@ -1023,9 +1023,15 @@ transfer(Fsm, Output, Recovery) ->
         {recover, F2} ->
             recover(F2, Recovery);
         %% '_output' is passed in next state as '_input'.
-        {S, #{'_output' := Input} = F2} ->      % S must be map().
+        {S, F2} ->      % S must be map().
+            S1 = case maps:find('_output', F2) of
+                     {ok, V} when V =/= undefined ->
+                         S#{'_input' => V};
+                     _ ->
+                         S
+                 end,
             %% Mark state in FSM and pass output as input.
-            S2 = S#{'_input' => Input, '_report' => true, '_of_fsm' => true},
+            S2 = S1#{'_report' => true, '_of_fsm' => true},
             {process, Pid, F3} = activate('_state', S2, F2),
             F4 = F3#{'_status' := running},
             %% relay the cached messages in failover status.
@@ -1046,6 +1052,8 @@ t1(#{'_step' := Step, <<"_max_steps">> := MaxSteps} = Fsm, Output)
   when Step >= MaxSteps ->
     t2(Fsm, Output, exceed_max_steps);
 %% Exception: output is tuple type, in case of being simple or crashed.
+t1(Fsm, {Vector}) ->
+    t2(Fsm, undefined, Vector);
 t1(Fsm, {Output, Vector}) ->
     t2(Fsm, Output, Vector);
 %% Normal: output is state map type. Must-have attribute '_sign' of state is
@@ -1524,8 +1532,8 @@ fetch_link(Key, Links, State) ->
         %% Type: state, process, function, data
         {ok, {Type, Data}} ->
             {Type, Data, State};
-        _Unknown ->
-            {error, badarg, State}
+        {ok, Data} ->
+            {data, Data, State}
     end.
 
 %%%===================================================================
