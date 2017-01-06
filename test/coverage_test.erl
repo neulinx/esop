@@ -409,4 +409,8 @@ coverage() ->
     {ok, #{}} = xl:stop(P41),
     S42 = S41#{<<"_report">> := []},
     {ok, P42} = xl:start(S42),
-    {ok, #{}} = xl:stop(P42).
+    {ok, #{}} = xl:stop(P42),
+    
+
+    {ok, P43} = xl:start(#{'_status' => running}),
+    {stopped, normal} = xl:stop(P43).

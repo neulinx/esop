@@ -228,6 +228,7 @@
 %% - wakeup event: xl_wakeup
 %% - hibernate command: xl_hibernate
 %% - stop command: xl_stop | {xl_stop, reason()}
+%% - state enter event: xl_enter.
 %% - state transition event: {xl_leave, Pid, state() | {Output, vector()}},
 %%   ACK: {ok, xl_leave_ack} reply to from Pid.
 %% - post data package for trace log:
@@ -609,7 +610,10 @@ unlink(Key, #{'_monitors' := M} = State, Stop) ->
 %% entry. The order of initialization is: [initialize runtime
 %% attributes] -> [call '_entry' action] -> [preload depended actors]
 %% -> [if it is FSM, start it]. The '_entry' action may affect
-%% follow-up steps.
+%% follow-up steps. Callback init/1 is a synchronous operation, _entry
+%% function must return as soon as possible. Time-costed operations
+%% and waitting for parent must place in _react function when xl_enter
+%% event raised.
 %% --------------------------------------------------------------------
 %% '_entry' action of state may be ignored if state is loaded from
 %% suspended state (by '_status' attribute) because it is already
@@ -619,6 +623,7 @@ init_state(#{'_status' := running} = State) ->
     {ok, State#{'_pid' => self()}};
 %% Initialize must-have attributes to the state.
 init_state(State) ->
+    self() ! xl_enter,
     Monitors = maps:get('_monitors', State, #{}),
     %% '_states' should be initilized by loader.
     State1 = State#{'_entry_time' => erlang:system_time(),
@@ -844,6 +849,11 @@ handle_3(Result) ->
 %% - In failover status, message may be queued in _pending_queue, that
 %%   may be relayed when FSM be recovered.
 %% --------------------------------------------------------------------
+%% Do not spread xl_enter and xl_wakeup messages to children.
+default_react(xl_enter, State) ->
+    {noreply, State};
+default_react(xl_wakeup, State) ->
+    {noreply, State};
 %% 'stop' message is high priority.
 default_react({xl_stop, Reason}, State) ->
     {stop, Reason, State};
