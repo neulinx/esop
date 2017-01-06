@@ -263,6 +263,15 @@ test6() ->
 %% c.recovery -> -2,
 %% d.recovary -> restart 
 %%-------------------------------------------------------------------
+%% dump_info() ->
+%%     receive
+%%         stop ->
+%%             ok;
+%%         Info ->
+%%             ?debugVal(Info),
+%%             dump_info()
+%%     end.
+
 test7() ->
     A0 = #{<<"_name">> => a, next => 1, <<"_recovery">> => {c}},
     B0 = #{<<"_name">> => b, next => c},
@@ -282,8 +291,12 @@ test7() ->
             <<"_max_retry">> => 4,
             <<"_name">> => fsm,
             '_states' => States},
+
+    %% ==== subscribe ====
+    %% Dump = spawn(fun dump_info/0),
     %% ==== normal loop ====
     {ok, F} = xl:start(Fsm),
+    %% xl:subscribe([F, <<".">>], Dump),
     {ok, a} = xl:call(F, {get, <<"_name">>}),
     xl:cast(F, transfer),
     {ok, b} = xl:call(F, {get, <<"_name">>}),
@@ -305,6 +318,7 @@ test7() ->
     #{'_output' := 4, <<"_name">> := d} = Res,
     %% ==== recovery loop ====
     {ok, F1} = xl:start(Fsm#{<<"_max_pending_size">> => 0}),
+    %% xl:subscribe([F1, <<".">>], Dump),
     {ok, a} = xl:call(F1, {get, <<"_name">>}),
     xl:cast(F1, crash),  % => c
     {error, timeout} = xl:call(F1, {get, <<"_name">>}, 10),
@@ -333,5 +347,3 @@ test7() ->
                                    Notify1
                            end,
     #{'_output' := 3, <<"_name">> := fsm} = Res1.
-
-
