@@ -1019,6 +1019,7 @@ transfer(Fsm, Output) ->
 
 %% To support different recovery option for each state.
 transfer(Fsm, Output, Recovery) ->
+    notify(self(), {leave, Output}),
     {_, _, F1} = archive(Fsm, Output),
     case t1(F1, Output) of
         %% Halt the FSM but keep actor running for data access.
