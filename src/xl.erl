@@ -235,6 +235,7 @@
 %%           {xl_trace, {log, Trace} | {backtrack, Back}}
 %% - failover retry event: {xl_retry, recovery()} |  % for FSM
 %%         {xl_retry, Key, <<"restart">>}  % for active attribute.
+%% - command to notify all subscribers: {xl_notify, Notification}.
 %%
 %% Predefined signs:
 %% Generally, all internal signs are atom type.
