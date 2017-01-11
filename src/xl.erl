@@ -163,7 +163,7 @@
 %% State data with overrided actions and recovery.
 %% Todo: raw data cannot support tuple type.
 -type state_d() :: state() | {state(), actions(), recovery()}.
--type refers() :: refer() | state_d() | {data, term()}.
+-type refers() :: refer() | state_d() | {data, term()} | term().
 %% Common type for key, id, name or tag.
 -type tag() :: atom() | string() | binary() | integer().
 -type path() :: [process() | tag()].
