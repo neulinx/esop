@@ -411,6 +411,23 @@ coverage() ->
     {ok, P42} = xl:start(S42),
     {ok, #{}} = xl:stop(P42),
     
-
     {ok, P43} = xl:start(#{'_status' => running}),
-    {stopped, normal} = xl:stop(P43).
+    {stopped, normal} = xl:stop(P43),
+    
+    F44 = fun({xlx, _, Path, bb}, S) ->
+                     xl:relay(Path, {get, b}, S);
+             ({xlx, _, _Path, cc}, S) ->
+                     xl:relay([c], get, S);
+             ({xlx, _, Path, dd}, S) ->
+                     xl:relay(Path, {get, b}, S#{<<"_timeout">> => 0});
+             (_Info, S) ->
+                  {ok, unhandled, S}
+          end,
+    L44 = #{a => {state, #{b => 2}}},
+    S44 = #{'_react' => F44, '_states' => L44, c => 3},
+    {ok, P44} = xl:start(S44),
+    {ok, 2} = xl:call([P44, a], bb),
+    {ok, 3} = xl:call(P44, cc),
+    {error, timeout} = xl:call([P44, a], dd),
+    {stopped, normal} = xl:stop(P44).
+    
