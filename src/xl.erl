@@ -23,6 +23,7 @@
 -export([start/1, start/2, start/3]).
 -export([stop/1, stop/2, stop/3]).
 -export([call/2, call/3, call/4, cast/2, cast/3, reply/2]).
+-export([relay/3, relay/4]).
 -export([subscribe/1, subscribe/2, unsubscribe/2, notify/2]).
 -export([get/2, get_raw/2, get_all/1, put/3, delete/2, delete/3]).
 
@@ -222,7 +223,7 @@
 %% Message format:
 %% 
 %% - normal: {xlx, From, Command} -> reply().
-%% - traverse with path: {xlx, From, Path, Command} -> reply().
+%% - relay with path: {xlx, From, Path, Command} -> reply().
 %% - touch & activate command: {xlx, from(), xl_touch} ->
 %%     {process, Pid} | {state, state_d()} | {data, Data} | {error, Error}.
 %% - wakeup event: xl_wakeup
@@ -607,6 +608,85 @@ unlink(Key, #{'_monitors' := M} = State, Stop) ->
     end.
 
 %% --------------------------------------------------------------------
+%% Process messages with path, when react function does not handle it.
+%%
+%% Hierarchical data in a state data map can only support
+%% get/put/delete operations.
+%%
+%% relay/3 is sync operation that wait for expected reply. Instant
+%% return version of relay is relay/4 with first parameter
+%% 'undefined': relay(undefined, Path, Notification, State). Compare
+%% with similar functions call and cast, function relay is called
+%% inside actor process while call/cast is called outside the process.
+%% --------------------------------------------------------------------
+-spec relay(path(), Command :: term(), state()) -> result().
+relay(Path, Command, State) ->
+    Tag = make_ref(),
+    case relay({self(), Tag}, Path, Command, State) of
+        {ok, S} ->
+            Timeout = maps:get(<<"_timeout">>, S, ?DFL_TIMEOUT),
+            receive
+                {Tag, {Code, Result}} ->
+                    {Code, Result, S}
+            after
+                Timeout ->
+                    {error, timeout, S}
+            end;
+        Done ->
+            Done
+    end.
+
+-spec relay(from(), path(), Command :: term(), state()) -> result().
+relay(_, [Key], get, State) ->
+    recall({get, Key}, State);
+relay(_, [Key], {put, Value}, State) ->
+    recall({put, Key, Value}, State);
+relay(_, [Key], delete, State) ->
+    recall({delete, Key}, State);
+relay(From, [Key | Path], Command, State) ->
+    case activate(Key, State) of
+        {process, Pid, S} ->
+            Pid ! {xlx, From, Path, Command},
+            {ok, S};
+        {function, Func, S} ->
+            Func({xlx, From, Path, Command}, S);
+        {data, Package, S} ->  % Path is not empty.
+            case iterate(Command, Path, Package) of
+                error ->
+                    {error, undefined, S};
+                {dirty, Data} ->
+                    {ok, done, S#{Key => Data}};
+                {Code, Value} ->  % {ok, Value} | {error, Error}.
+                    {Code, Value, S}
+            end;
+        Error ->
+            Error
+    end.
+
+iterate(_, _, Container) when not is_map(Container) ->
+    {error, badarg};
+iterate(get, [Key], Container) ->
+    maps:find(Key, Container);
+iterate({put, Value}, [Key], Container) ->
+    NewC = maps:put(Key, Value, Container),
+    {dirty, NewC};
+iterate(delete, [Key], Container) ->
+    NewC = maps:remove(Key, Container),
+    {dirty, NewC};
+iterate(Command, [Key | Path], Container) ->
+    case maps:find(Key, Container) of
+        {ok, Branch} ->
+            case iterate(Command, Path, Branch) of
+                {dirty, NewB} ->
+                    {dirty, Container#{Key := NewB}};
+                Result ->
+                    Result
+            end;
+        error ->
+            {error, badarg}
+    end.
+
+%% --------------------------------------------------------------------
 %% gen_server callbacks. Initializes the server with state action
 %% entry. The order of initialization is: [initialize runtime
 %% attributes] -> [call '_entry' action] -> [preload depended actors]
@@ -897,7 +977,7 @@ default_react({xlx, _, [], _} = Request,
 default_react({xlx, _From, [], Command}, State) ->
     recall(Command, State);
 default_react({xlx, From, Path, Command}, State) ->
-    traverse(From, Path, Command, State);
+    relay(From, Path, Command, State);
 %% ------ Messages for actor or FSM ------
 default_react(Info, State) ->
     recast(Info, State).
@@ -1215,61 +1295,6 @@ enqueue(Item, Queue, infinity) ->
     [Item | Queue];
 enqueue(Item, Queue, Limit) ->
     lists:sublist([Item | Queue], Limit).
-
-%% --------------------------------------------------------------------
-%% Process messages with path, when react function does not handle it.
-%%
-%% Hierarchical data in a state data map can only support
-%% get/put/delete operations.
-%% --------------------------------------------------------------------
-traverse(_, [Key], get, State) ->
-    recall({get, Key}, State);
-traverse(_, [Key], {put, Value}, State) ->
-    recall({put, Key, Value}, State);
-traverse(_, [Key], delete, State) ->
-    recall({delete, Key}, State);
-traverse(From, [Key | Path], Command, State) ->
-    case activate(Key, State) of
-        {process, Pid, S} ->
-            Pid ! {xlx, From, Path, Command},
-            {ok, S};
-        {function, Func, S} ->
-            Func({xlx, From, Path, Command}, S);
-        {data, Package, S} ->  % Path is not empty.
-            case iterate(Command, Path, Package) of
-                error ->
-                    {error, undefined, S};
-                {dirty, Data} ->
-                    {ok, done, S#{Key => Data}};
-                {Code, Value} ->  % {ok, Value} | {error, Error}.
-                    {Code, Value, S}
-            end;
-        Error ->
-            Error
-    end.
-
-iterate(_, _, Container) when not is_map(Container) ->
-    {error, badarg};
-iterate(get, [Key], Container) ->
-    maps:find(Key, Container);
-iterate({put, Value}, [Key], Container) ->
-    NewC = maps:put(Key, Value, Container),
-    {dirty, NewC};
-iterate(delete, [Key], Container) ->
-    NewC = maps:remove(Key, Container),
-    {dirty, NewC};
-iterate(Command, [Key | Path], Container) ->
-    case maps:find(Key, Container) of
-        {ok, Branch} ->
-            case iterate(Command, Path, Branch) of
-                {dirty, NewB} ->
-                    {dirty, Container#{Key := NewB}};
-                Result ->
-                    Result
-            end;
-        error ->
-            {error, badarg}
-    end.
 
 %% --------------------------------------------------------------------
 %% Terminating and submit final report.
