@@ -47,9 +47,7 @@ coverage() ->
 
     F1 = fun(xl_wakeup, #{parent := Parent} = S) ->
                  Parent ! xl_wakeup,
-                 {ok, S};
-            (_, S) ->
-                 {ok, unhandled, S}
+                 {ok, S}
          end,
     {ok, P5} = xl:start(#{parent => self(),
                           '_react' => F1,
@@ -97,11 +95,7 @@ coverage() ->
             ok
     end,
 
-    F4 = fun({xl_stop, _}, S) ->
-                 {ok, S};
-            (_, S) ->
-                 {ok, unhandled, S}
-         end,
+    F4 = fun({xl_stop, _}, S) -> {ok, S} end,
     {ok, P10} = xl:start(#{'_react' => F4}),
     {ok, R4} = xl:subscribe(P10),
     ok = gen_server:cast(P10, {xl_stop, normal}),
@@ -120,10 +114,7 @@ coverage() ->
                  {stop, normal, stop, S};
             ({test, Pid}, S) ->
                  Pid ! ok,
-                 {ok, done, S};
-
-            (_, S) ->
-                 {ok, unhandled, S}
+                 {ok, done, S}
          end,
 
     {ok, P11} = xl:start(#{'_react' => F5}),
@@ -214,9 +205,7 @@ coverage() ->
     {stopped, normal} = xl:stop(P18),
 
     F19 = fun({xlx, _, [], {xl_trace, Log}}, Fsm) ->
-                  F18(Log, Fsm);
-             (_, Fsm) ->
-                  {ok, unhandled, Fsm}
+                  F18(Log, Fsm)
           end,
     S19 = #{'_react' => F19, name => s19},
     M19 = #{'_states' => #{'_traces' => {state, S19},
@@ -305,7 +294,7 @@ coverage() ->
     F27 = fun() ->
                   receive
                       stop ->
-                          stop
+                          ignore_coverage
                   end
           end,
     S27 = spawn(F27),
@@ -419,9 +408,7 @@ coverage() ->
              ({xlx, _, _Path, cc}, S) ->
                      xl:relay([c], get, S);
              ({xlx, _, Path, dd}, S) ->
-                     xl:relay(Path, {get, b}, S#{<<"_timeout">> => 0});
-             (_Info, S) ->
-                  {ok, unhandled, S}
+                     xl:relay(Path, {get, b}, S#{<<"_timeout">> => 0})
           end,
     L44 = #{a => {state, #{b => 2}}},
     S44 = #{'_react' => F44, '_states' => L44, c => 3},
@@ -429,5 +416,33 @@ coverage() ->
     {ok, 2} = xl:call([P44, a], bb),
     {ok, 3} = xl:call(P44, cc),
     {error, timeout} = xl:call([P44, a], dd),
-    {stopped, normal} = xl:stop(P44).
+    {stopped, normal} = xl:stop(P44),
+    
+    {ok, P45} = xl:start(#{}),
+    F46 = fun(xl_enter, #{'_parent' := Parent} = S) ->
+                  link(Parent),
+                  {ok, S};
+             ({xlx, _, _, {bind, Pid}}, S) ->
+                  link(Pid),
+                  {ok, done, S#{'_parent' => Pid, '_bond' => normal}}
+          end,
+    {ok, P46} = xl:start(#{'_parent' => P45,
+                           '_react' => F46,
+                           '_bond' => standalone}),
+    {ok, R46} = xl:subscribe(P46),
+    {stopped, normal} = xl:stop(P45),
+    receive
+        {R46, _} ->
+            ignore_coverage
+    after
+        10 ->
+            continue
+    end,
+    {ok, P47} = xl:start(#{}),
+    {ok, done} = xl:call(P46, {bind, P47}),
+    {stopped, normal} = xl:stop(P47),
+    receive
+        {R46, {exit, _}} ->
+            reach_here
+    end.
     

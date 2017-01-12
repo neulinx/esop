@@ -43,9 +43,7 @@ react({xlx, _, _, crash}, _S) ->
     error(crash);
 react({xlx, _, _, transfer}, S) ->
     Next = maps:get(next, S, stop),
-    {stop, normal, S#{'_sign' => Next}};
-react(_, State) ->
-    {ok, unhandled, State}.
+    {stop, normal, S#{'_sign' => Next}}.
 
 exit(#{'_input' := Input} = S) ->
     S#{'_output' => Input + 1};
@@ -87,8 +85,8 @@ test2() ->
     xl:unsubscribe(Pid, Ref),
     xl:notify(Pid, test),
     timeout = receive
-                  Info1 ->
-                      Info1
+                  _ ->
+                      ignore_coverage
               after
                   10 ->
                       timeout

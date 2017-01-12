@@ -111,6 +111,7 @@
              '_output' => term(),
              '_states' => states(),
              '_monitors' => monitors(),
+             '_bond' => 'standalone' | tag(),  % how to deal with EXIT event.
              %% Flag of FSM.
              '_state' => active_key() | {'state', state_d()} | tag(),
              %% Flag of state in FSM.
@@ -309,7 +310,7 @@ terminate(Reason, State) ->
 -spec code_change(OldVsn :: term(), state(), Extra :: term()) ->
                          {'ok', state()}.
 code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
+    {ok, State}.                                % ignore_coverage_test
 
 %% --------------------------------------------------------------------
 %% Starts the server.
@@ -858,12 +859,17 @@ normalize_msg(Msg) ->
 %% Notice: if there is no '_react' action or '_react' action do not
 %% process this message, should return {ok, unhandled, State} to
 %% handle it by default routine. Otherwise, the message will be
-%% ignored.
+%% ignored. As a syntactic sugar, {ok, unhandled, State} is generated
+%% automatically.
 handle(Info, #{'_react' := React} = State) ->
-    React(Info, State);
+    try
+        React(Info, State)
+    catch
+        error : function_clause ->
+            {ok, unhandled, State}
+    end;
 handle(_Info, State) ->
     {ok, unhandled, State}.
-
 
 %% Process unhandled message by default handlers.
 handle_1(Info, {ok, unhandled, State}) ->
@@ -944,8 +950,14 @@ default_react({xl_stop, Reason}, State) ->
 default_react({'DOWN', M, _, _, _} = Down, State) ->
     handle_halt(M, Down, State);
 %% Since all actor process flag is trap_exit, all linked processes may
-%% generate 'EXIT' message on quitting. Strategy of actor to handle
-%% unknown 'EXIT' is to ignore it.
+%% generate 'EXIT' message on quitting. If '_parent' process crashed
+%% and bond type is not standalone, current actor should exit
+%% too. Strategy of actor to handle unknown 'EXIT' is to ignore it.
+default_react({'EXIT', Pid, _} = Exit,
+              #{'_parent' := Pid, '_bond' := standalone} = State) ->
+    handle_halt(Pid, Exit, State);
+default_react({'EXIT', Pid, _}, #{'_parent' := Pid} = State) ->
+    {stop, {shutdown, break}, State};
 default_react({'EXIT', Pid, _} = Exit, State) ->
     handle_halt(Pid, Exit, State);
 %% Delay restart for failed active attribute.
