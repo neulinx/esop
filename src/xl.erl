@@ -118,27 +118,29 @@
              '_of_fsm' => 'true' | 'false', % default false.
              %% Wether to submit report to parent process.
              '_report' => 'true' | 'false', % default true.
-%             <<"_report">> => <<"all">> | <<"default">> | list(),
+             %% <<"all">> | <<"default">> | list(),
+             '_report_items' => binary() | list(),
              '_sign' => sign(),
              '_step' => non_neg_integer(),
              '_traces' => active_key() | map(),
              '_retry_count' => non_neg_integer(),
-             '_pending_queue' => list()
-%% Runtime data with binary type names.
-%             <<"_max_pending_size">> => limit(),
-%             <<"_aftermath">> => aftermath(),
-%             <<"_recovery">> => recovery(),
-%             <<"_link_recovery">> => <<"restart">>,
-%             <<"_name">> => tag(),
-%             <<"_state">> => state() | [Output, Sign],
-%             <<"_max_step">> => limit(),
-%             <<"_preload">> => list(),
-%             <<"_timeout">> => timeout(), 
-%             <<"_recovery">> => recovery(),
-%             <<"_max_traces">> => limit(),
-%             <<"_max_retry">> => limit(),
-%             <<"_retry_interval">> => limit(),
-%             <<"_hibernate">> => timeout()  % mandatory, default: infinity
+             '_pending_queue' => list(),
+             '_max_pending_size' => limit(),
+             %% Quit or keep running after FSM stop. Default value is
+             %% <<"quit">>, stop running. If value is <<"halt">>, keep
+             %% running.
+             '_aftermath' => binary(),
+             '_recovery' => recovery(),
+             '_link_recovery' => binary(),  % default is <<"restart">>.
+             '_name' => tag(),
+             '_start' => map(),  % #{<<"input">>, <<"sign">>},
+             '_max_steps' => limit(),
+             '_preload' => list(),
+             '_timeout' => timeout(), 
+             '_max_traces' => limit(),
+             '_max_retry' => limit(),
+             '_retry_interval' => limit(),
+             '_hibernate' => timeout()  % mandatory, default: infinity
             } |         % Header part, common attributes.
                  map(). % Body part, data payload of the actor.
 
@@ -161,7 +163,7 @@
 %% name is conflict with states_map().
 -type states() :: active_key() | states_map() | links_map().
 %% Reference of another actor's attribute.
--type refer() :: {'ref', Registry :: (process() | tag()), Id :: tag()}.
+-type refer() :: {'ref', Registry :: (process() | path()), Id :: tag()}.
 %% State data with overrided actions and recovery.
 %% Todo: raw data cannot support tuple type.
 -type state_d() :: state() | {state(), actions(), recovery()}.
@@ -214,11 +216,9 @@
 %% in state map is tuple type.
 -type vector() :: {GlobalEdge :: tag()} |
                   {Vetex :: tag(), Edge :: tag()}.
-%% There is not atomic or string type in raw data. Such strings are
+%% There is no atomic or string type in raw data. Such strings are
 %% all binary type as <<"AtomOrString">>.
-%% -type limit() :: non_neg_integer() | 'infinity' | tag().  % <<"infinity">>.
-%% Quit or keep running after FSM stop. Default value is <<"quit">>.
-%% -type aftermath() :: <<"quit">> | <<"halt">>.
+-type limit() :: non_neg_integer() | 'infinity'.
 
 %% --------------------------------------------------------------------
 %% Message format:
@@ -319,7 +319,7 @@ code_change(_OldVsn, State, _Extra) ->
 %% server_name is 'undefined', the functions same as start/2 or
 %% start_link/2.
 %% 
-%% Value of <<"_timeout">> attribute will affect the entire life
+%% Value of '_timeout' attribute will affect the entire life
 %% cycle of this actor, include init function and request response.
 %% --------------------------------------------------------------------
 -spec start_link(state()) -> start_ret().
@@ -357,7 +357,7 @@ start(Name, State, Options) ->
 %% If option {timeout,Time} is present, the gen_server process is
 %% allowed to spend $Time milliseconds initializing or it is
 %% terminated and the start function returns {error,timeout}.
-merge_options(Options, #{<<"_timeout">> := Timeout}) ->
+merge_options(Options, #{'_timeout' := Timeout}) ->
     Options ++ [{timeout, Timeout}];  % Quick and dirty, but it works.
 merge_options(Options, _) ->
     Options.
@@ -444,7 +444,7 @@ call(Process, Path, Command, Timeout) ->
             {error, timeout}
     end.
 
-scall(Process, Command, #{<<"_timeout">> := Timeout}) ->
+scall(Process, Command, #{'_timeout' := Timeout}) ->
     call(Process, [], Command, Timeout);
 scall(Process, Command, _) ->
     call(Process, [], Command, ?DFL_TIMEOUT).
@@ -530,8 +530,8 @@ get(Key, State) ->
             {Sign, Result, State1};
         {function, Func, State1} ->
             Func({get, Key}, State1);
-        Error ->
-            Error
+        OkOrError ->
+            OkOrError
     end.
 
 %% Raw data in state attributes map.
@@ -620,12 +620,12 @@ unlink(Key, #{'_monitors' := M} = State, Stop) ->
 %% with similar functions call and cast, function relay is called
 %% inside actor process while call/cast is called outside the process.
 %% --------------------------------------------------------------------
--spec relay(path(), Command :: term(), state()) -> result().
+-spec relay(path() | process(), Command :: term(), state()) -> result().
 relay(Path, Command, State) ->
     Tag = make_ref(),
     case relay({self(), Tag}, Path, Command, State) of
         {ok, S} ->
-            Timeout = maps:get(<<"_timeout">>, S, ?DFL_TIMEOUT),
+            Timeout = maps:get('_timeout', S, ?DFL_TIMEOUT),
             receive
                 {Tag, {Code, Result}} ->
                     {Code, Result, S}
@@ -637,7 +637,7 @@ relay(Path, Command, State) ->
             Done
     end.
 
--spec relay(from(), path(), Command :: term(), state()) -> result().
+-spec relay(from(), path() | process(), Command :: term(), state()) -> result().
 relay(_, [Key], get, State) ->
     recall({get, Key}, State);
 relay(_, [Key], {put, Value}, State) ->
@@ -662,10 +662,20 @@ relay(From, [Key | Path], Command, State) ->
             end;
         Error ->
             Error
-    end.
+    end;
+relay(From, Process, Command, State) ->  % pid or registered name.
+    Process ! {xlx, From, [], Command},
+    {ok, State}.
 
 iterate(_, _, Container) when not is_map(Container) ->
     {error, badarg};
+iterate({xl_touch, Key}, [], Container) ->
+    case maps:find(Key, Container) of
+        {ok, Value} ->  % For static data, cache it in Key.
+            {data, Value};
+        error ->
+            error
+    end;
 iterate(get, [Key], Container) ->
     maps:find(Key, Container);
 iterate({put, Value}, [Key], Container) ->
@@ -754,7 +764,7 @@ enter(State) ->
     {ok, State}.
 
 %% fail-fast of pre-load actors.
-preload(#{<<"_preload">> := Preload} = State) ->
+preload(#{'_preload' := Preload} = State) ->
     Activate = fun(Key, S) ->
                        case activate(Key, S) of
                            {error, Error, _S1} ->
@@ -776,7 +786,7 @@ preload(State) ->
 %% can be used as state processes, but it is not recommended to do
 %% so. But intializer of the FSM may pre-spawn a process as
 %% starter. Here is a simple initializing routine for raw data of
-%% <<"_state">>. Assert <<"_state">> is map of #{<<"input">> := Input,
+%% '_start'. Assert '_start' is map of #{<<"input">> := Input,
 %% <<"sign">> := Sign}, where Sign must be present and be list format.
 %% Note that the raw data does not support the tuple type. Raw data
 %% vector in list type may convert to tuple type at first.
@@ -789,8 +799,8 @@ init_fsm(#{'_state' := {link, _, _}} = Fsm) ->
 %% fun transfer/2.
 init_fsm(#{'_state' := InitializedState} = Fsm) ->
     transfer(Fsm, InitializedState);
-%% Be not initialized, accept only two parameters of <<"_state">> map.
-init_fsm(#{<<"_state">> := Map} = Fsm) ->
+%% Be not initialized, accept only two parameters of '_start' map.
+init_fsm(#{'_start' := Map} = Fsm) ->
     Input = maps:get(<<"input">>, Map, undefined),
     Sign = maps:get(<<"sign">>, Map),
     Next = {Input, list_to_tuple(Sign)},
@@ -920,7 +930,7 @@ handle_2(_, Stop) ->  % {stop, _, _, _}
     Stop.
 
 %% Only for OTP hibernate.
-handle_3({noreply, #{<<"_hibernate">> := Timeout} = S}) ->
+handle_3({noreply, #{'_hibernate' := Timeout} = S}) ->
     {noreply, S, Timeout};  % add hibernate support.
 handle_3(Result) ->
     Result.
@@ -1007,7 +1017,7 @@ handle_halt(Id, Throw, #{'_monitors' := M} = State) ->
         %% demand.
         {ok, {Key, <<"restart">>}} ->
             {ok, done, S} = delete(Key, State),
-            Interval = maps:get(<<"_retry_interval">>, S, ?RETRY_INTERVAL),
+            Interval = maps:get('_retry_interval', S, ?RETRY_INTERVAL),
             erlang:send_after(Interval, self(), {xl_retry, Key, <<"restart">>}),
             {ok, S};
         %% Just remove it and wait for next access to trigger recovery.
@@ -1083,9 +1093,9 @@ recast({xl_unsubscribe, Ref}, #{'_subscribers' := Subs} = State) ->
 %% Notice: if _max_pending_size is 0, do not cache message.
 %% 
 %% recast(Info, #{'_status' := failover,
-%%                <<"_max_pending_size">> := Size} = Fsm) ->
+%%                '_max_pending_size' := Size} = Fsm) ->
 recast(Info, #{'_status' := failover} = Fsm) ->
-    Size = maps:get(<<"_max_pending_size">>, Fsm, infinity),
+    Size = maps:get('_max_pending_size', Fsm, infinity),
     Q = maps:get('_pending_queue', Fsm, []),
     Q1 = enqueue(Info, Q, Size),
     {noreply, Fsm#{'_pending_queue' => Q1}};
@@ -1105,7 +1115,7 @@ recast(_Info, State) ->
 %% maybe {{'EXIT', Pid, Reason}, {exception}}. If state process would
 %% not output all state data, it may select and customize the state
 %% data map output.
-transfer(Fsm, #{<<"_recovery">> := Recovery} = Output) ->
+transfer(Fsm, #{'_recovery' := Recovery} = Output) ->
     transfer(Fsm, Output, Recovery);
 transfer(Fsm, Output) ->
     transfer(Fsm, Output, undefined).
@@ -1116,7 +1126,7 @@ transfer(Fsm, Output, Recovery) ->
     {_, _, F1} = archive(Fsm, Output),
     case t1(F1, Output) of
         %% Halt the FSM but keep actor running for data access.
-        {stop, #{<<"_aftermath">> := <<"halt">>} = F2} ->
+        {stop, #{'_aftermath' := <<"halt">>} = F2} ->
             {ok, F2#{'_status' := halt}};
         {halt, F2} ->
             {ok, F2#{'_status' := halt}};
@@ -1152,7 +1162,7 @@ transfer(Fsm, Output, Recovery) ->
 %% steps is exceede, the full transition message is treated as output
 %% includes sign in it. So healer may create new process with the
 %% output as start state.
-t1(#{'_step' := Step, <<"_max_steps">> := MaxSteps} = Fsm, Output)
+t1(#{'_step' := Step, '_max_steps' := MaxSteps} = Fsm, Output)
   when Step >= MaxSteps ->
     t2(Fsm, Output, exceed_max_steps);
 %% Exception: output is tuple type, in case of being simple or crashed.
@@ -1205,7 +1215,7 @@ t3({Next, Fsm}, Output, Vector) ->
 make_vector(#{'_sign' := Sign}) when is_tuple(Sign) ->
     Sign;
 %% Relative sign with name.
-make_vector(#{'_sign' := Sign, <<"_name">> := Name}) ->
+make_vector(#{'_sign' := Sign, '_name' := Name}) ->
     {Name, Sign};
 %% Relative sign without name, treated as global sign.
 make_vector(#{'_sign' := Sign}) ->
@@ -1226,14 +1236,14 @@ extract_sign(Sign) ->
 %% Failover and recovery.
 %% --------------------------------------------------------------------
 %% '_retry_count' is lifetime count of all failover. The retry count
-%% is cumulative unless the actor is reset. If <<"_max_retry">> is not
+%% is cumulative unless the actor is reset. If '_max_retry' is not
 %% present, retry times is unlimited.
-recover(#{'_retry_count' := Count, <<"_max_retry">> := Max} = Fsm, _)
+recover(#{'_retry_count' := Count, '_max_retry' := Max} = Fsm, _)
   when Count >= Max ->
     {stop, {shutdown, too_many_retry}, Fsm#{'_status' := exception}};
-%% Attention: if value of <<"_recovery">> is undefined, here is an
+%% Attention: if value of '_recovery' is undefined, here is an
 %% infinite loop!
-recover(#{<<"_recovery">> := Recovery} = Fsm, undefined) ->
+recover(#{'_recovery' := Recovery} = Fsm, undefined) ->
     recover(Fsm, Recovery);
 recover(Fsm, undefined) ->
     {stop, {shutdown, incurable}, Fsm#{'_status' := exception}};
@@ -1241,7 +1251,7 @@ recover(Fsm, undefined) ->
 %% triggered by message. Even the "_retry_interval" is 0, retry
 %% operation is still asynchronous.
 recover(Fsm, Recovery) ->
-    Interval = maps:get(<<"_retry_interval">>, Fsm, ?RETRY_INTERVAL),
+    Interval = maps:get('_retry_interval', Fsm, ?RETRY_INTERVAL),
     Count = maps:get('_retry_count', Fsm, 0),
     erlang:send_after(Interval, self(), {xl_retry, Recovery}),
     {ok, Fsm#{'_status' := failover, '_retry_count' => Count + 1}}.
@@ -1263,7 +1273,7 @@ retry(#{'_output' := Output} = Fsm, Vector) ->
     transfer(Fsm, {Output, Vector}).
 
 %% If '_traces' is not present, archive do nothing. So trace log is
-%% disable default, but <<"_max_traces">> default value is
+%% disable default, but '_max_traces' default value is
 %% MAX_TRACES. Trace is form of state() | {Output, Vector}.
 archive(#{'_traces' := {function, Traces}} = Fsm, Trace) ->
     Traces({log, Trace}, Fsm);
@@ -1271,7 +1281,7 @@ archive(#{'_traces' := {link, Traces, _}} = Fsm, Trace) ->
     {Code, Result} = scall(Traces, {xl_trace, {log, Trace}}, Fsm),
     {Code, Result, Fsm};
 archive(#{'_traces' := Traces} = Fsm, Trace)  ->
-    Limit = maps:get(<<"_max_traces">>, Fsm, ?MAX_TRACES),
+    Limit = maps:get('_max_traces', Fsm, ?MAX_TRACES),
     Traces1 = enqueue(Trace, Traces, Limit),
     {ok, done, Fsm#{'_traces' => Traces1}};
 archive(Fsm, _Trace) ->
@@ -1335,7 +1345,7 @@ ensure_sign(State) ->
 %% of the FSM is previous result because of current state may have no
 %% time to yield output.
 stop_fsm(#{'_state' := {link, Pid, _}} = Fsm, Reason) ->
-    Timeout = maps:get(<<"_timeout">>, Fsm, ?DFL_TIMEOUT),
+    Timeout = maps:get('_timeout', Fsm, ?DFL_TIMEOUT),
     case stop(Pid, Reason, Timeout) of
         {ok, Output} ->
             Fsm#{'_state' := Output,
@@ -1366,7 +1376,7 @@ goodbye1(State) ->
 
 %% Goodbye, subscribers! And submit leave report.
 goodbye2(#{'_subscribers' := Subs} = State) ->
-    Detail = maps:get(<<"_report">>, State, <<"default">>),
+    Detail = maps:get('_report_items', State, <<"default">>),
     Report = make_report(Detail, State),
     Info = {exit, Report},
     %% Notify and remove all subscribers.
@@ -1396,7 +1406,7 @@ goodbye3(State, _) ->
 %% xl_leave message, please set '_report' flag to false in state
 %% attribute.
 report(Supervisor, undefined, State) ->
-    Detail = maps:get(<<"_report">>, State, <<"default">>),
+    Detail = maps:get('_report_items', State, <<"default">>),
     Report = make_report(Detail, State),
     report(Supervisor, Report, State);
 report(Supervisor, Report, #{'_of_fsm' := true} = State) ->
@@ -1415,7 +1425,7 @@ make_report([], _) ->
 make_report(<<"all">>, State) ->
     State;
 make_report(<<"default">>, State) ->
-    make_report([<<"_name">>, '_sign', '_output', <<"_recovery">>], State);
+    make_report(['_name', '_sign', '_output', '_recovery'], State);
 %% Selections is a list of attributes to yield.
 make_report(Selections, State) ->
     maps:with(Selections, State).
@@ -1449,6 +1459,7 @@ flush_and_relay(Pid, Timeout) ->
 %% -spec activate(tag(), state()) -> {process, pid(), state()} |
 %%                                   {function, fun(), state()} |
 %%                                   {data, term(), state()} |
+%%                                   {tag(), term(), state()} |
 %%                                   {error, term(), state()}.
 activate(Key, State) ->
     case maps:find(Key, State) of
@@ -1494,12 +1505,12 @@ activate(_Unknown, _Key, _Value, State) ->
 activate_(Key, Value, #{'_monitors' := M} = State) ->
     Start = Value#{'_parent' => self(), '_surname' => Key},
     {ok, Pid} = start_link(Start),
-    Recovery = maps:get(<<"_recovery">>, Start, undefined),
+    Recovery = maps:get('_recovery', Start, undefined),
     Monitors = M#{Pid => {Key, Recovery}},
     {process, Pid, State#{Key => {link, Pid, Pid}, '_monitors' := Monitors}}.
 
 %% Try to retrieve data or external actor, and attach to attribute of
-%% current actor.  Reovery :: restart | undeinfed.
+%% current actor. Cache data if fetch_link retrun {data, Data, State}.
 attach(Key, #{'_states' := Links} = State) ->
     case fetch_link(Key, Links, State) of
         %% external actor.
@@ -1511,10 +1522,10 @@ attach(Key, #{'_states' := Links} = State) ->
         {state, Data, S} ->
             activate(Key, Data, S);
         %% data only, copy it as initial value.
-        {data, Data, S} ->
+        {data, Data, S} ->  % Data should be cached.
             {data, Data, S#{Key => Data}};
-        Error ->
-            Error
+        VolatileValue ->  % Error or volatile data need not cache in attribute.
+            VolatileValue
     end;
 attach(_, State) ->
     {error, undefined, State}.
@@ -1531,13 +1542,19 @@ attach(Key, Process, #{'_monitors' := M} = State) ->
     {process, Process, NewState}.
 
 %% -type state_d() :: state() | {state(), actions(), recovery()}.
-%% -type result() :: {process, pid(), state()} | 
-%%                   {function, Func, state()} |
-%%                 {state, state_d(), state()} |
-%%                 {data, term(), state()} |
-%%                 {error, term(), state()}.
-%% Links function type:
-%% -spec link_fun(tag(), state()) -> result().
+%% 
+%% -type result() :: {process, pid(), state()} |
+%%   {function, Func, state()} |
+%%   {state, state_d(), state()} |
+%%   {data, term(), state()} |
+%%   {Code, Data, state()} |
+%%   {error, term(), state()}.
+%%   
+%% If fetch link returned static data as {data, Data, State}, the Data
+%% may be cached in related attribute.
+%% 
+%% Links function type: -spec link_fun(tag(),
+%% state()) -> result().
 fetch_link(Key, {function, Links}, State) ->
     Links(Key, State);
 %% Links pid type:
@@ -1557,31 +1574,14 @@ fetch_link(Key, Links, State) ->
     case maps:find(Key, Links) of
         error ->
             {error, undefined, State};
-        %% Registry process directly.
-        %% Should be deprecated because of no monitor.
-        {ok, {ref, Registry, Id}} when is_pid(Registry) ->
-            {Sign, Result} = scall(Registry, {xl_touch, Id}, State),
-            {Sign, Result, State};
-        %% attribute name as registry.
-        {ok, {ref, RegName, Id}} ->
-            case activate(RegName, State) of
-                {process, Registry, State1} ->
-                    {Sign, Result} = scall(Registry, {xl_touch, Id}, State1),
-                    {Sign, Result, State1};
-                {function, Registry, State1} ->
-                    Registry({xl_touch, Id}, State1);
-                {data, Data, State1} when Id =/= undefined ->
-                    Value = maps:get(Id, Data),
-                    {data, Value, State1};
-                %% when Id is undefined, return {data, Data, State1}.
-                %% Same case as Error :: {error, term()}.
-                Error ->
-                    Error
-            end;
+        %% Registry may be path, process id or registered name of
+        %% register's process.
+        {ok, {ref, Registry, Id}} ->
+            relay(Registry, {xl_touch, Id}, State);
         %% Type: state, process, function, data
         {ok, {Type, Data}} ->
             {Type, Data, State};
-        {ok, Data} ->
+        {ok, Data} ->  % Default behavior is cache data in attribute.
             {data, Data, State}
     end.
 

@@ -16,7 +16,7 @@ create(Data) ->
     Data#{test => yes}.
 
 coverage() ->
-    {ok, P1} = xl:start_link(undefined, #{<<"_timeout">> => 1000}, []),
+    {ok, P1} = xl:start_link(undefined, #{'_timeout' => 1000}, []),
     {stopped, normal} = xl:stop(P1),
 
     xl:start_link({local, p2}, #{}, []),
@@ -68,12 +68,12 @@ coverage() ->
     {error, normal} = xl:start(#{'_entry' => F3}),
 
     {error, {{preload_failure, undefined}, _}} =
-        xl:start(#{<<"_preload">> => [a]}),
+        xl:start(#{'_preload' => [a]}),
 
     {ok, P7} = xl:start(#{}),
     L1 = #{'_state' => {process, P7}},
     {ok, P8} = xl:start(#{'_states' => L1,
-                          <<"_preload">> => ['_state']}),
+                          '_preload' => ['_state']}),
     {ok, R2} = xl:subscribe([P8, <<".">>]),
     {ok, done} = gen_server:call(P7, {xl_stop, normal}),
     receive
@@ -137,7 +137,7 @@ coverage() ->
             ok
     end,
 
-    {ok, P14} = xl:start(#{'_react' => F5, <<"_hibernate">> => 10}),
+    {ok, P14} = xl:start(#{'_react' => F5, '_hibernate' => 10}),
     {error, unknown} = gen_server:call(P14, hello),
     ok = gen_server:cast(P14, {xl_leave, undefined, test}),
     ok = gen_server:cast(P14, {test, self()}),
@@ -154,7 +154,7 @@ coverage() ->
 
     M3 = #{'_states' => #{},
            name => m3,
-           <<"_aftermath">> => <<"halt">>,
+           '_aftermath' => <<"halt">>,
            '_state' => #{}},
     {ok, P15} = xl:start(M3),
     ok = xl:cast([P15, '_state'], xl_stop),
@@ -172,8 +172,8 @@ coverage() ->
     {stopped, normal} = xl:stop(P16),
 
     M5 = #{'_states' => #{{start} => #{'_sign' => start}},
-           <<"_max_steps">> => 2,
-           <<"_aftermath">> => <<"halt">>,
+           '_max_steps' => 2,
+           '_aftermath' => <<"halt">>,
            '_state' => {[], start}},
     {ok, P17} = xl:start(M5),
     {ok, done} = xl:call(P17, xl_stop),
@@ -193,7 +193,7 @@ coverage() ->
           end,
     S18 = #{'_sign' => exception},
     M18 = #{'_states' => #{{start} => S18, '_traces' => {function, F18}},
-            <<"_recovery">> => -2,
+            '_recovery' => -2,
             '_state' => {[], start}},
     {ok, P18} = xl:start(M18),
     {ok, done} = xl:call(P18, xl_stop),
@@ -210,8 +210,8 @@ coverage() ->
     S19 = #{'_react' => F19, name => s19},
     M19 = #{'_states' => #{'_traces' => {state, S19},
                            {start} => #{'_sign' => exception}},
-            <<"_recovery">> => -2,
-            <<"_timeout">> => 1000,
+            '_recovery' => -2,
+            '_timeout' => 1000,
             '_state' => {[], start}},
     {ok, P19} = xl:start(M19),
     {ok, done} = xl:call(P19, xl_stop),
@@ -224,10 +224,10 @@ coverage() ->
     {ok, 5} = xl:call([P19, <<".">>], {get, '_step'}),
     {stopped, normal} = xl:stop(P19),
 
-    M20 = #{<<"_recovery">> => <<"rollback">>,
+    M20 = #{'_recovery' => <<"rollback">>,
             '_states' => #{{start} => #{'_sign' => exception}},
             '_traces' => [],
-            <<"_max_traces">> => 0,
+            '_max_traces' => 0,
             '_state' => {[], start}},
     {ok, P20} = xl:start(M20),
     {ok, R20} = xl:subscribe([P20, <<".">>]),
@@ -251,7 +251,7 @@ coverage() ->
                   State#{'_report' := false}
           end,
     S21 = #{'_exit' => F21},
-    M21 = #{<<"_recovery">> => <<"rollback">>,
+    M21 = #{'_recovery' => <<"rollback">>,
             '_states' => #{{start} => S21},
             '_traces' => [],
             '_state' => {1, start}},
@@ -299,7 +299,7 @@ coverage() ->
           end,
     S27 = spawn(F27),
     M27 = #{'_state' => {link, S27, undefined},
-            <<"_timeout">> => 1},
+            '_timeout' => 1},
     {ok, P27} = xl:start(M27),
     {stopped, normal} = xl:stop(P27),
 
@@ -308,13 +308,13 @@ coverage() ->
     {stopped, normal} = xl:stop(P28),
 
     S29 = #{'_parent' => self(),
-            <<"_report">> => <<"all">>,
+            '_report_items' => <<"all">>,
             '_report' => true},
     {ok, P29} = xl:start(S29),
     {ok, Y29} = xl:stop(P29),
     true = maps:get('_report', Y29),
 
-    S30 = S29#{<<"_report">> => [a, b],
+    S30 = S29#{'_report_items' => [a, b],
                a => 1, b => 2,
                '_report' => true},
     {ok, P30} = xl:start(S30),
@@ -355,7 +355,7 @@ coverage() ->
     {error, unknown} = xl:call(P36, {get, test}),
     {stopped, normal} = xl:stop(P36),
 
-    S37 = #{a => 1, b => 2},
+    S37 = #{a => 1, b => 2, c => #{d => 3}},
     {ok, P37} = xl:start(S37),
     L38 = #{x => {ref, P37, a}},
     {ok, P38} = xl:start(#{'_states' => L38}),
@@ -363,22 +363,28 @@ coverage() ->
     {stopped, normal} = xl:stop(P38),
     {stopped, normal} = xl:stop(P37),
 
-    F39 = fun({xl_touch, Key}, State) ->
-                  {ok, Key, State}
+    F39 = fun({xlx, _, [], {xl_touch, Key}}, State) ->
+                  {ok, Key, State}  % Data not cache in Key.
           end,
-    L39 = #{x => {ref, register, y},
-            y => {ref, s37, b},
-            z => {ref, ss, c},
+    L39 = #{x => {ref, [register], y},
+            y => {ref, [s37], b},
+            z => {ref, [ss], c},
+            d => {ref, [s37, c], d},
+            e => {ref, [s37, c], e},
             a => {a, b, c},
             b => {a, b},
             s37 => {data, S37},
             register => {function, F39}},
     {ok, P39} = xl:start(#{'_states' => L39}),
     {ok, y} = xl:call(P39, {get, x}),
+    {error, undefined} = xl:call(P39, {get, x, raw}),
     {ok, 2} = xl:call(P39, {get, y}),
+    {ok, 2} = xl:call(P39, {get, y, raw}),
     {error, undefined} = xl:call(P39, {get, z}),
     {ok, {a, b, c}} = xl:call(P39, {get, a}),
     {a, b} = xl:call(P39, {get, b}),
+    {ok, 3} = xl:call(P39, {get, d}),
+    {error, undefined} = xl:call(P39, {get, e}),
     {stopped, normal} = xl:stop(P39),
 
     F40 = fun({get, Key}, S) ->
@@ -393,10 +399,10 @@ coverage() ->
     {ok, #{2 := a}} = xl:call(P40, get),
     {stopped, normal} = xl:stop(P40),
 
-    S41 = #{'_parent' => self(), <<"_report">> => false, '_report' => true},
+    S41 = #{'_parent' => self(), '_report_items' => false, '_report' => true},
     {ok, P41} = xl:start(S41),
     {ok, #{}} = xl:stop(P41),
-    S42 = S41#{<<"_report">> := []},
+    S42 = S41#{'_report_items' := []},
     {ok, P42} = xl:start(S42),
     {ok, #{}} = xl:stop(P42),
     
@@ -408,7 +414,7 @@ coverage() ->
              ({xlx, _, _Path, cc}, S) ->
                      xl:relay([c], get, S);
              ({xlx, _, Path, dd}, S) ->
-                     xl:relay(Path, {get, b}, S#{<<"_timeout">> => 0})
+                     xl:relay(Path, {get, b}, S#{'_timeout' => 0})
           end,
     L44 = #{a => {state, #{b => 2}}},
     S44 = #{'_react' => F44, '_states' => L44, c => 3},
