@@ -163,7 +163,7 @@
 %% name is conflict with states_map().
 -type states() :: active_key() | states_map() | links_map().
 %% Reference of another actor's attribute.
--type refer() :: {'ref', Registry :: (process() | tag()), Id :: tag()}.
+-type refer() :: {'ref', Registry :: (process() | path()), Id :: tag()}.
 %% State data with overrided actions and recovery.
 %% Todo: raw data cannot support tuple type.
 -type state_d() :: state() | {state(), actions(), recovery()}.
@@ -530,8 +530,8 @@ get(Key, State) ->
             {Sign, Result, State1};
         {function, Func, State1} ->
             Func({get, Key}, State1);
-        Error ->
-            Error
+        OkOrError ->
+            OkOrError
     end.
 
 %% Raw data in state attributes map.
@@ -620,7 +620,7 @@ unlink(Key, #{'_monitors' := M} = State, Stop) ->
 %% with similar functions call and cast, function relay is called
 %% inside actor process while call/cast is called outside the process.
 %% --------------------------------------------------------------------
--spec relay(path(), Command :: term(), state()) -> result().
+-spec relay(path() | process(), Command :: term(), state()) -> result().
 relay(Path, Command, State) ->
     Tag = make_ref(),
     case relay({self(), Tag}, Path, Command, State) of
@@ -637,7 +637,7 @@ relay(Path, Command, State) ->
             Done
     end.
 
--spec relay(from(), path(), Command :: term(), state()) -> result().
+-spec relay(from(), path() | process(), Command :: term(), state()) -> result().
 relay(_, [Key], get, State) ->
     recall({get, Key}, State);
 relay(_, [Key], {put, Value}, State) ->
@@ -662,10 +662,20 @@ relay(From, [Key | Path], Command, State) ->
             end;
         Error ->
             Error
-    end.
+    end;
+relay(From, Process, Command, State) ->  % pid or registered name.
+    Process ! {xlx, From, [], Command},
+    {ok, State}.
 
 iterate(_, _, Container) when not is_map(Container) ->
     {error, badarg};
+iterate({xl_touch, Key}, [], Container) ->
+    case maps:find(Key, Container) of
+        {ok, Value} ->  % For static data, cache it in Key.
+            {data, Value};
+        error ->
+            error
+    end;
 iterate(get, [Key], Container) ->
     maps:find(Key, Container);
 iterate({put, Value}, [Key], Container) ->
@@ -1449,6 +1459,7 @@ flush_and_relay(Pid, Timeout) ->
 %% -spec activate(tag(), state()) -> {process, pid(), state()} |
 %%                                   {function, fun(), state()} |
 %%                                   {data, term(), state()} |
+%%                                   {tag(), term(), state()} |
 %%                                   {error, term(), state()}.
 activate(Key, State) ->
     case maps:find(Key, State) of
@@ -1499,7 +1510,7 @@ activate_(Key, Value, #{'_monitors' := M} = State) ->
     {process, Pid, State#{Key => {link, Pid, Pid}, '_monitors' := Monitors}}.
 
 %% Try to retrieve data or external actor, and attach to attribute of
-%% current actor.  Reovery :: restart | undeinfed.
+%% current actor. Cache data if fetch_link retrun {data, Data, State}.
 attach(Key, #{'_states' := Links} = State) ->
     case fetch_link(Key, Links, State) of
         %% external actor.
@@ -1511,10 +1522,10 @@ attach(Key, #{'_states' := Links} = State) ->
         {state, Data, S} ->
             activate(Key, Data, S);
         %% data only, copy it as initial value.
-        {data, Data, S} ->
+        {data, Data, S} ->  % Data should be cached.
             {data, Data, S#{Key => Data}};
-        Error ->
-            Error
+        VolatileValue ->  % Error or volatile data need not cache in attribute.
+            VolatileValue
     end;
 attach(_, State) ->
     {error, undefined, State}.
@@ -1531,13 +1542,19 @@ attach(Key, Process, #{'_monitors' := M} = State) ->
     {process, Process, NewState}.
 
 %% -type state_d() :: state() | {state(), actions(), recovery()}.
-%% -type result() :: {process, pid(), state()} | 
-%%                   {function, Func, state()} |
-%%                 {state, state_d(), state()} |
-%%                 {data, term(), state()} |
-%%                 {error, term(), state()}.
-%% Links function type:
-%% -spec link_fun(tag(), state()) -> result().
+%% 
+%% -type result() :: {process, pid(), state()} |
+%%   {function, Func, state()} |
+%%   {state, state_d(), state()} |
+%%   {data, term(), state()} |
+%%   {Code, Data, state()} |
+%%   {error, term(), state()}.
+%%   
+%% If fetch link returned static data as {data, Data, State}, the Data
+%% may be cached in related attribute.
+%% 
+%% Links function type: -spec link_fun(tag(),
+%% state()) -> result().
 fetch_link(Key, {function, Links}, State) ->
     Links(Key, State);
 %% Links pid type:
@@ -1557,31 +1574,14 @@ fetch_link(Key, Links, State) ->
     case maps:find(Key, Links) of
         error ->
             {error, undefined, State};
-        %% Registry process directly.
-        %% Should be deprecated because of no monitor.
-        {ok, {ref, Registry, Id}} when is_pid(Registry) ->
-            {Sign, Result} = scall(Registry, {xl_touch, Id}, State),
-            {Sign, Result, State};
-        %% attribute name as registry.
-        {ok, {ref, RegName, Id}} ->
-            case activate(RegName, State) of
-                {process, Registry, State1} ->
-                    {Sign, Result} = scall(Registry, {xl_touch, Id}, State1),
-                    {Sign, Result, State1};
-                {function, Registry, State1} ->
-                    Registry({xl_touch, Id}, State1);
-                {data, Data, State1} when Id =/= undefined ->
-                    Value = maps:get(Id, Data),
-                    {data, Value, State1};
-                %% when Id is undefined, return {data, Data, State1}.
-                %% Same case as Error :: {error, term()}.
-                Error ->
-                    Error
-            end;
+        %% Registry may be path, process id or registered name of
+        %% register's process.
+        {ok, {ref, Registry, Id}} ->
+            relay(Registry, {xl_touch, Id}, State);
         %% Type: state, process, function, data
         {ok, {Type, Data}} ->
             {Type, Data, State};
-        {ok, Data} ->
+        {ok, Data} ->  % Default behavior is cache data in attribute.
             {data, Data, State}
     end.
 

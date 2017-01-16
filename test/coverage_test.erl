@@ -355,7 +355,7 @@ coverage() ->
     {error, unknown} = xl:call(P36, {get, test}),
     {stopped, normal} = xl:stop(P36),
 
-    S37 = #{a => 1, b => 2},
+    S37 = #{a => 1, b => 2, c => #{d => 3}},
     {ok, P37} = xl:start(S37),
     L38 = #{x => {ref, P37, a}},
     {ok, P38} = xl:start(#{'_states' => L38}),
@@ -363,22 +363,28 @@ coverage() ->
     {stopped, normal} = xl:stop(P38),
     {stopped, normal} = xl:stop(P37),
 
-    F39 = fun({xl_touch, Key}, State) ->
-                  {ok, Key, State}
+    F39 = fun({xlx, _, [], {xl_touch, Key}}, State) ->
+                  {ok, Key, State}  % Data not cache in Key.
           end,
-    L39 = #{x => {ref, register, y},
-            y => {ref, s37, b},
-            z => {ref, ss, c},
+    L39 = #{x => {ref, [register], y},
+            y => {ref, [s37], b},
+            z => {ref, [ss], c},
+            d => {ref, [s37, c], d},
+            e => {ref, [s37, c], e},
             a => {a, b, c},
             b => {a, b},
             s37 => {data, S37},
             register => {function, F39}},
     {ok, P39} = xl:start(#{'_states' => L39}),
     {ok, y} = xl:call(P39, {get, x}),
+    {error, undefined} = xl:call(P39, {get, x, raw}),
     {ok, 2} = xl:call(P39, {get, y}),
+    {ok, 2} = xl:call(P39, {get, y, raw}),
     {error, undefined} = xl:call(P39, {get, z}),
     {ok, {a, b, c}} = xl:call(P39, {get, a}),
     {a, b} = xl:call(P39, {get, b}),
+    {ok, 3} = xl:call(P39, {get, d}),
+    {error, undefined} = xl:call(P39, {get, e}),
     {stopped, normal} = xl:stop(P39),
 
     F40 = fun({get, Key}, S) ->
