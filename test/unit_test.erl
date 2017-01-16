@@ -182,13 +182,13 @@ test4() ->
 %%-------------------------------------------------------------------
 test5() ->
     Exit = fun exit/1,
-    T1 = #{<<"_name">> => t1, '_sign' => t2, '_exit' => Exit},
-    T2 = #{<<"_name">> => t2, '_sign' => t3, '_exit' => Exit},
-    T3 = #{<<"_name">> => t3, '_exit' => Exit},  % '_sign' => stop
+    T1 = #{'_name' => t1, '_sign' => t2, '_exit' => Exit},
+    T2 = #{'_name' => t2, '_sign' => t3, '_exit' => Exit},
+    T3 = #{'_name' => t3, '_exit' => Exit},  % '_sign' => stop
     States = #{{<<"start">>} => T1, {t1, t2} => T2, {t3} => T3},
     StartState = #{<<"input">> => 0, <<"sign">> => [<<"start">>]},
-    Fsm = #{<<"_state">> => StartState,
-            <<"_name">> => fsm,
+    Fsm = #{'_start' => StartState,
+            '_name' => fsm,
             '_states' => States},
     test5(Fsm),
     F = fun(Vector, S) ->
@@ -202,25 +202,25 @@ test5() ->
                         {error, undefined, S}
                 end
         end,
-    Fsm2 = #{<<"_state">> => StartState,
-             <<"_name">> => fsm,
+    Fsm2 = #{'_start' => StartState,
+             '_name' => fsm,
              '_states' => {function, F}},
     test5(Fsm2),
     P = #{'_states' => {function, F}},
-    Fsm3 = #{<<"_state">> => StartState,
-             <<"_name">> => fsm,
+    Fsm3 = #{'_start' => StartState,
+             '_name' => fsm,
              '_states' => {state, P}},
     test5(Fsm3).
 
 
 test5(Fsm) ->
     {ok, F} = xl:start(Fsm),
-    {ok, t1} = xl:call(F, {get, <<"_name">>}),
-    {ok, fsm} = xl:call([F, <<".">>], {get, <<"_name">>}),
+    {ok, t1} = xl:call(F, {get, '_name'}),
+    {ok, fsm} = xl:call([F, <<".">>], {get, '_name'}),
     {ok, done} = xl:call(F, xl_stop),
-    {ok, t2} = xl:call(F, {get, <<"_name">>}),
+    {ok, t2} = xl:call(F, {get, '_name'}),
     {ok, done} = xl:call(F, xl_stop),
-    {ok, t3} = xl:call(F, {get, <<"_name">>}),
+    {ok, t3} = xl:call(F, {get, '_name'}),
     {ok, Ref} = xl:subscribe(F),
     {ok, done} = xl:call(F, xl_stop),
     {Ref, {exit, #{'_output' := 3}}} = receive
@@ -234,7 +234,7 @@ test5(Fsm) ->
 test6() ->
     React = fun react/2,
     A = #{name => a, '_react' => React},
-    B = #{name => b, '_react' => React, <<"_recovery">> => <<"restart">>},
+    B = #{name => b, '_react' => React, '_recovery' => <<"restart">>},
     Links = #{a => {state, A}, b => {state, B}},
     Actor = #{name => actor, '_states' => Links},
     {ok, Pid} = xl:start(Actor),
@@ -257,7 +257,7 @@ test6() ->
 %% Recovery for FSM
 %% start -> a -> b -> c -> d -> stop
 %% a.recovery -> c,
-%% b.recovery -> undefined, default is FSM <<"_recovery">>.
+%% b.recovery -> undefined, default is FSM '_recovery'.
 %% c.recovery -> -2,
 %% d.recovary -> restart 
 %%-------------------------------------------------------------------
@@ -271,10 +271,10 @@ test6() ->
 %%     end.
 
 test7() ->
-    A0 = #{<<"_name">> => a, next => 1, <<"_recovery">> => {c}},
-    B0 = #{<<"_name">> => b, next => c},
-    C0 = #{<<"_name">> => c, next => {2}, <<"_recovery">> => -2},
-    D0 = #{<<"_name">> => d, <<"_recovery">> => <<"restart">>},
+    A0 = #{'_name' => a, next => 1, '_recovery' => {c}},
+    B0 = #{'_name' => b, next => c},
+    C0 = #{'_name' => c, next => {2}, '_recovery' => -2},
+    D0 = #{'_name' => d, '_recovery' => <<"restart">>},
     A = xl:create(?MODULE, A0),
     B = xl:create(?MODULE, B0),
     C = xl:create(?MODULE, C0),
@@ -284,10 +284,14 @@ test7() ->
                {a, 1} => B,
                {c} => C,
                {2} => D},
-    Fsm = #{<<"_recovery">> => <<"rollback">>,
+    React = fun({xlx, _, _, {max_pending_size, Size}}, S) ->
+                    {ok, done, S#{'_max_pending_size' => Size}}
+            end,
+    Fsm = #{'_react' => React,
+            '_recovery' => <<"rollback">>,
             '_traces' => [],
-            <<"_max_retry">> => 4,
-            <<"_name">> => fsm,
+            '_max_retry' => 4,
+            '_name' => fsm,
             '_states' => States},
 
     %% ==== subscribe ====
@@ -295,13 +299,13 @@ test7() ->
     %% ==== normal loop ====
     {ok, F} = xl:start(Fsm),
     %% xl:subscribe([F, <<".">>], Dump),
-    {ok, a} = xl:call(F, {get, <<"_name">>}),
+    {ok, a} = xl:call(F, {get, '_name'}),
     xl:cast(F, transfer),
-    {ok, b} = xl:call(F, {get, <<"_name">>}),
+    {ok, b} = xl:call(F, {get, '_name'}),
     xl:cast(F, transfer),
-    {ok, c} = xl:call(F, {get, <<"_name">>}),
+    {ok, c} = xl:call(F, {get, '_name'}),
     xl:cast(F, transfer),
-    {ok, d} = xl:call(F, {get, <<"_name">>}),
+    {ok, d} = xl:call(F, {get, '_name'}),
     {error, undefined} = xl:call([F, <<".">>], {get, '_retry_count'}),
     %% Traces = xl:call(F, {get, '_traces'}, [<<".">>]),
     %% ?debugVal(Traces),
@@ -313,27 +317,27 @@ test7() ->
                              Notify ->
                                  Notify
                          end,
-    #{'_output' := 4, <<"_name">> := d} = Res,
+    #{'_output' := 4, '_name' := d} = Res,
     %% ==== recovery loop ====
-    {ok, F1} = xl:start(Fsm#{<<"_max_pending_size">> => 0}),
+    {ok, F1} = xl:start(Fsm#{'_max_pending_size' => 0}),
     %% xl:subscribe([F1, <<".">>], Dump),
-    {ok, a} = xl:call(F1, {get, <<"_name">>}),
+    {ok, a} = xl:call(F1, {get, '_name'}),
     xl:cast(F1, crash),  % => c
-    {error, timeout} = xl:call(F1, {get, <<"_name">>}, 10),
-    {ok, c} = xl:call(F1, {get, <<"_name">>}),
+    {error, timeout} = xl:call(F1, {get, '_name'}, 10),
+    {ok, c} = xl:call(F1, {get, '_name'}),
     xl:cast(F1, transfer),
-    {ok, d} = xl:call(F1, {get, <<"_name">>}),
-    {ok, done} = xl:call([F1, <<".">>], {put, <<"_max_pending_size">>, 100}),
+    {ok, d} = xl:call(F1, {get, '_name'}),
+    {ok, done} = xl:call([F1, <<".">>], {max_pending_size, 100}),
     xl:cast(F1, crash),  % => restart
-    {ok, a} = xl:call(F1, {get, <<"_name">>}),
+    {ok, a} = xl:call(F1, {get, '_name'}),
     xl:cast(F1, transfer),
-    {ok, b} = xl:call(F1, {get, <<"_name">>}),
+    {ok, b} = xl:call(F1, {get, '_name'}),
     xl:cast(F1, crash),  % => rollback
-    {ok, b} = xl:call(F1, {get, <<"_name">>}),
+    {ok, b} = xl:call(F1, {get, '_name'}),
     xl:cast(F1, transfer),  % => c
-    {ok, c} = xl:call(F1, {get, <<"_name">>}),
+    {ok, c} = xl:call(F1, {get, '_name'}),
     xl:cast(F1, crash),  % => rollback -2
-    {ok, c} = xl:call(F1, {get, <<"_name">>}),
+    {ok, c} = xl:call(F1, {get, '_name'}),
     {ok, 12} = xl:call([F1, <<".">>], {get, '_step'}),
     {ok, 4} = xl:call([F1, <<".">>], {get, '_retry_count'}),
     {ok, Ref1} = xl:subscribe([F1, <<".">>]),
@@ -344,4 +348,4 @@ test7() ->
                                Notify1 ->
                                    Notify1
                            end,
-    #{'_output' := 3, <<"_name">> := fsm} = Res1.
+    #{'_output' := 3, '_name' := fsm} = Res1.
