@@ -1439,12 +1439,12 @@ flush_and_relay(Pid, Timeout) ->
         {ok, xl_leave_ack} ->
             flush_and_relay(Pid, 0);
         {'DOWN', _, _, _, _} ->
-            flush_and_relay(Pid);
+            flush_and_relay(Pid, Timeout);
         {'EXIT', _, _} ->
-            flush_and_relay(Pid);
+            flush_and_relay(Pid, Timeout);
         Message ->
             Pid ! Message,
-            flush_and_relay(Pid)
+            flush_and_relay(Pid, Timeout)
     after Timeout ->
             true
     end.
