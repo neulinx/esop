@@ -450,5 +450,11 @@ coverage() ->
     receive
         {R46, {exit, _}} ->
             reach_here
-    end.
+    end,
     
+    {ok, P48} = xl:start(#{a => 1}),
+    {ok, P49} = xl:start(#{aa => {ref, P48, a}}),
+    {ok, 1} = xl:call([P49, aa], get),
+    {stopped, normal} = xl:stop(P48),
+    {ok, 1} = xl:call([P49, aa], get),
+    {stopped, normal} = xl:stop(P49).

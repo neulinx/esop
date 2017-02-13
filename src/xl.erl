@@ -565,16 +565,15 @@ get_all(State) ->
 -spec put(tag(), Value :: term(), state()) -> {'ok', 'done', state()}.
 put(Key, {process, Process}, State) ->
     S = unlink(Key, State, true),
-    {process, _, S1} = attach(Key, Process, S),
+    {process, _, S1} = attach(process, Process, Key, S),
     {ok, done, S1};
 put(Key, {function, Func}, State) ->
     S = unlink(Key, State, true),
-    {function, _, S1} = attach(Key, Func, S),
+    {function, _, S1} = attach(function, Func, Key, S),
     {ok, done, S1};
 put(Key, Value, State) ->
     S = unlink(Key, State, true),
     {ok, done, S#{Key => Value}}.
-
 
 -spec delete(tag(), state()) -> {'ok', 'done', state()}.
 delete(Key, State) ->
@@ -1469,6 +1468,11 @@ activate(Key, State) ->
             {function, Func, State};
         {ok, {state, S}} ->
             activate(Key, S, State);
+        %% Registry may be path, process id or registered name of
+        %% register's process.
+        {ok, {ref, Registry, Id}} ->
+            {Type, Data, S} = relay(Registry, {xl_touch, Id}, State),
+            attach(Type, Data, Key, S);
         {ok, Value} ->
             {data, Value, State};
         error ->  % not found, try to activate data in '_states'.
@@ -1512,34 +1516,30 @@ activate_(Key, Value, #{'_monitors' := M} = State) ->
 %% Try to retrieve data or external actor, and attach to attribute of
 %% current actor. Cache data if fetch_link retrun {data, Data, State}.
 attach(Key, #{'_states' := Links} = State) ->
-    case fetch_link(Key, Links, State) of
-        %% external actor.
-        {process, Pid, S} ->
-            attach(Key, Pid, S);
-        {function, Func, S} ->
-            attach(Key, Func, S);
-        %% state data to spawn link local child actor.
-        {state, Data, S} ->
-            activate(Key, Data, S);
-        %% data only, copy it as initial value.
-        {data, Data, S} ->  % Data should be cached.
-            {data, Data, S#{Key => Data}};
-        VolatileValue ->  % Error or volatile data need not cache in attribute.
-            VolatileValue
-    end;
+    {Type, Data, State1} = fetch_link(Key, Links, State),
+    attach(Type, Data, Key, State1);
 attach(_, State) ->
     {error, undefined, State}.
 
-%% attach process or function to an active attribute.
-attach(Key, Func, State) when is_function(Func) ->
+%% attach function to an active attribute.
+attach(function, Func, Key, State) ->
     {function, Func, State#{Key => {function, Func}}};
 %% Process is pid or registered name of a process.
-attach(Key, Process, #{'_monitors' := M} = State) ->
+attach(process, Process, Key, #{'_monitors' := M} = State) ->
     Mref = monitor(process, Process),
     Recovery = maps:get('_link_recovery', State, undefined),
     M1 = M#{Mref => {Key, Recovery}},
     NewState = State#{Key => {link, Process, Mref}, '_monitors' := M1},
-    {process, Process, NewState}.
+    {process, Process, NewState};
+%% state data to spawn link local child actor.
+attach(state, Data, Key, State) ->
+    activate(Key, Data, State);
+%% data only, copy it as initial value.
+attach(data, Data, Key, State) ->
+    {data, Data, State#{Key => Data}};
+%% Error or volatile data need not cache in attribute Key.
+attach(Type, Data, _Key, State) ->
+    {Type, Data, State}.
 
 %% -type state_d() :: state() | {state(), actions(), recovery()}.
 %% 
