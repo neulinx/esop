@@ -23,8 +23,9 @@
 -export([start/1, start/2, start/3]).
 -export([stop/1, stop/2, stop/3]).
 -export([call/2, call/3, call/4, cast/2, cast/3, reply/2]).
--export([relay/3, relay/4]).
 -export([subscribe/1, subscribe/2, unsubscribe/2, notify/2]).
+-export([touch/1, touch/2]).
+-export([relay/3, relay/4, activate/2, activate/3]).
 -export([get/2, get_raw/2, get_all/1, put/3, delete/2, delete/3]).
 
 %% -------------------------------------------------------------------
@@ -157,8 +158,13 @@
 -type monitors() :: #{identifier() => monitor()}.
 -type active_key() :: {'link', process(), identifier()} |
                       {'function', function()}.
+-type attribute() :: {'link', process(), identifier()} |
+                     {'function', function()} |
+                     {'state', state_d()} |
+                     refer() |
+                     term().
 -type states_map() :: #{vector() => state()}.
--type links_map() :: #{Key :: tag() => refers()}.
+-type links_map() :: #{Key :: tag() => attribute()}.
 %% If vector() was list, links_map contains string type of attribute
 %% name is conflict with states_map().
 -type states() :: active_key() | states_map() | links_map().
@@ -166,8 +172,7 @@
 -type refer() :: {'ref', Registry :: (process() | path()), Id :: tag()}.
 %% State data with overrided actions and recovery.
 %% Todo: raw data cannot support tuple type.
--type state_d() :: state() | {state(), actions(), recovery()}.
--type refers() :: refer() | state_d() | {data, term()} | term().
+-type state_d() :: state() | {state(), actions()}.
 %% Common type for key, id, name or tag.
 -type tag() :: atom() | string() | binary() | integer().
 -type path() :: [process() | tag()].
@@ -206,6 +211,16 @@
 -type state_actions() :: #{'_entry' => entry(),
                            '_exit' => exit(),
                            '_react' => react()}.
+-type touch_return() :: {process, pid()} |
+                        {function, function()} |
+                        {data, term()} |
+                        {tag(), term()} |
+                        {error, term()}.
+-type active_return() :: {process, pid(), state()} |
+                         {function, function(), state()} |
+                         {data, term(), state()} |
+                         {tag(), term(), state()} |
+                         {error, term(), state()}.
 %% There is a potential recovery option 'undefined' as default
 %% recovery mode, crashed active attribute may be recovered by next
 %% 'touch'. Actually tag() is <<"restart">> or <<"rollback">>.
@@ -225,8 +240,7 @@
 %% 
 %% - normal: {xlx, From, Command} -> reply().
 %% - relay with path: {xlx, From, Path, Command} -> reply().
-%% - touch & activate command: {xlx, from(), xl_touch} ->
-%%     {process, Pid} | {state, state_d()} | {data, Data} | {error, Error}.
+%% - touch & activate command: {xlx, from(), xl_touch} -> touch_return().
 %% - wakeup event: xl_wakeup
 %% - hibernate command: xl_hibernate
 %% - stop command: xl_stop | {xl_stop, reason()}
@@ -514,6 +528,17 @@ notify(Process, Info) ->
     catch Process ! {xl_notify, Info},
     ok.
 
+%% Helper function for xl_touch command.
+-spec touch(process() | path(), tag()) -> touch_return().
+touch(Path, Key) ->
+    call(Path, {xl_touch, Key}).
+
+-spec touch(path()) -> touch_return().
+touch(Path) ->
+    Key = lists:last(Path),
+    Process = lists:droplast(Path),
+    touch(Process, Key).
+
 %% --------------------------------------------------------------------
 %% API for internal data access.
 %% --------------------------------------------------------------------
@@ -694,6 +719,138 @@ iterate(Command, [Key | Path], Container) ->
             end;
         error ->
             {error, badarg}
+    end.
+
+%% --------------------------------------------------------------------
+%% Helper functions for active attribute access.
+%% --------------------------------------------------------------------
+%% Data types of attributes:
+%% {link, pid(), identifier()} | {ref, path() | process(), tag()} |
+%%   {state, {state(), actions()}} | {state, state()} | Value :: term().
+%% when actions() :: state | module() | Module :: binary() | Actions :: map().
+-spec activate(tag(), state()) -> active_return().
+activate(Key, State) ->
+    case maps:find(Key, State) of
+        {ok, {link, Pid, _}} ->
+            {process, Pid, State};
+        {ok, {function, Func}} ->
+            {function, Func, State};
+        {ok, {state, S}} ->
+            activate(Key, S, State);
+        %% Registry may be path, process id or registered name of
+        %% register's process.
+        {ok, {ref, Registry, Id}} ->
+            {Type, Data, S} = relay(Registry, {xl_touch, Id}, State),
+            attach(Type, Data, Key, S);
+        {ok, Value} ->
+            {data, Value, State};
+        error ->  % not found, try to activate data in '_states'.
+            attach(Key, State)
+    end.
+
+-spec activate(tag(), state_d(), state()) -> active_return().
+activate(Key, {S, Actions}, State) ->
+    activate(Actions, Key, S, State);
+activate(Key, Value, State) ->
+    Actions = maps:get('_actions', Value, state),
+    activate(Actions, Key, Value, State).
+
+%% Intermediate function to bind behaviors with state.
+activate(state, Key, Value, State) ->
+    activate_(Key, Value, State);
+activate(Module, Key, Value, State) when is_atom(Module) ->
+    Value1 = create(Module, Value),
+    activate_(Key, Value1, State);
+activate(Module, Key, Value, State) when is_binary(Module) ->
+    Module1 = binary_to_existing_atom(Module, utf8),
+    activate(Module1, Key, Value, State);
+%% Actions is map type with state behaviors: #{'_entry', '_react', '_exit'}.
+activate(Actions, Key, Value, State) when is_map(Actions) ->
+    Value1 = maps:merge(Value, Actions),
+    activate_(Key, Value1, State);
+activate(_Unknown, _Key, _Value, State) ->    
+    {error, unknown, State}.
+
+%% Value must be map type. Spawn state machine and link it as active
+%% attribute.
+%% 
+%% Todo: Every state may have own recovery settings. Recovery may be
+%% the initial state data for fast rollback.
+activate_(Key, Value, #{'_monitors' := M} = State) ->
+    Start = Value#{'_parent' => self(), '_surname' => Key},
+    {ok, Pid} = start_link(Start),
+    Recovery = maps:get('_recovery', Start, undefined),
+    Monitors = M#{Pid => {Key, Recovery}},
+    {process, Pid, State#{Key => {link, Pid, Pid}, '_monitors' := Monitors}}.
+
+%% Try to retrieve data or external actor, and attach to attribute of
+%% current actor. Cache data if fetch_link retrun {data, Data, State}.
+attach(Key, #{'_states' := Links} = State) ->
+    {Type, Data, State1} = fetch_link(Key, Links, State),
+    attach(Type, Data, Key, State1);
+attach(_, State) ->
+    {error, undefined, State}.
+
+%% attach function to an active attribute.
+attach(function, Func, Key, State) ->
+    {function, Func, State#{Key => {function, Func}}};
+%% Process is pid or registered name of a process.
+attach(process, Process, Key, #{'_monitors' := M} = State) ->
+    Mref = monitor(process, Process),
+    Recovery = maps:get('_link_recovery', State, undefined),
+    M1 = M#{Mref => {Key, Recovery}},
+    NewState = State#{Key => {link, Process, Mref}, '_monitors' := M1},
+    {process, Process, NewState};
+%% state data to spawn link local child actor.
+attach(state, Data, Key, State) ->
+    activate(Key, Data, State);
+%% data only, copy it as initial value.
+attach(data, Data, Key, State) ->
+    {data, Data, State#{Key => Data}};
+%% Error or volatile data need not cache in attribute Key.
+attach(Type, Data, _Key, State) ->
+    {Type, Data, State}.
+
+%% -type result() :: {process, pid(), state()} |
+%%   {function, Func, state()} |
+%%   {state, state_d(), state()} |
+%%   {data, term(), state()} |
+%%   {Code, Data, state()} |
+%%   {error, term(), state()}.
+%%   
+%% If fetch link returned static data as {data, Data, State}, the Data
+%% may be cached in related attribute.
+%% 
+%% Links function type: -spec link_fun(tag(),
+%% state()) -> result().
+fetch_link(Key, {function, Links}, State) ->
+    Links(Key, State);
+%% Links pid type:
+%% send special command 'touch': {xlx, From, {xl_touch, Key}},
+%%   argument: Key :: tag(),
+%%   return: result() without last state() element.
+fetch_link(Key, {link, Links, _}, State) ->
+    {Sign, Result} = scall(Links, {xl_touch, Key}, State),
+    {Sign, Result, State};
+%% Links map type format:
+%% {ref, Registry :: (pid() | tag()), tag()} |
+%%   {state, state_d()} |
+%%   {data, term()}.
+%% return: {process, pid(), state()} | {state, state_d(), state()}
+%%     | {data, term(), state()} | {error, term(), state()}.
+fetch_link(Key, Links, State) ->
+    case maps:find(Key, Links) of
+        error ->
+            {error, undefined, State};
+        %% Registry may be path, process id or registered name of
+        %% register's process.
+        {ok, {ref, Registry, Id}} ->
+            relay(Registry, {xl_touch, Id}, State);
+        %% Type: state, process, function, data
+        {ok, {Type, Data}} ->
+            {Type, Data, State};
+        {ok, Data} ->  % Default behavior is cache data in attribute.
+            {data, Data, State}
     end.
 
 %% --------------------------------------------------------------------
@@ -1446,143 +1603,6 @@ flush_and_relay(Pid, Timeout) ->
             flush_and_relay(Pid, Timeout)
     after Timeout ->
             true
-    end.
-
-%% --------------------------------------------------------------------
-%% Helper functions for active attribute access.
-%% --------------------------------------------------------------------
-%% Data types of attributes:
-%% {link, pid(), identifier()} |
-%%   {state, {state(), actions()}} | {state, state()} | Value :: term().
-%% when actions() :: state | module() | Module :: binary() | Actions :: map().
-%% -spec activate(tag(), state()) -> {process, pid(), state()} |
-%%                                   {function, fun(), state()} |
-%%                                   {data, term(), state()} |
-%%                                   {tag(), term(), state()} |
-%%                                   {error, term(), state()}.
-activate(Key, State) ->
-    case maps:find(Key, State) of
-        {ok, {link, Pid, _}} ->
-            {process, Pid, State};
-        {ok, {function, Func}} ->
-            {function, Func, State};
-        {ok, {state, S}} ->
-            activate(Key, S, State);
-        %% Registry may be path, process id or registered name of
-        %% register's process.
-        {ok, {ref, Registry, Id}} ->
-            {Type, Data, S} = relay(Registry, {xl_touch, Id}, State),
-            attach(Type, Data, Key, S);
-        {ok, Value} ->
-            {data, Value, State};
-        error ->  % not found, try to activate data in '_states'.
-            attach(Key, State)
-    end.
-
-activate(Key, {S, Actions}, State) ->
-    activate(Actions, Key, S, State);
-activate(Key, Value, State) ->
-    Actions = maps:get('_actions', Value, state),
-    activate(Actions, Key, Value, State).
-
-%% Intermediate function to bind behaviors with state.
-activate(state, Key, Value, State) ->
-    activate_(Key, Value, State);
-activate(Module, Key, Value, State) when is_atom(Module) ->
-    Value1 = create(Module, Value),
-    activate_(Key, Value1, State);
-activate(Module, Key, Value, State) when is_binary(Module) ->
-    Module1 = binary_to_existing_atom(Module, utf8),
-    activate(Module1, Key, Value, State);
-%% Actions is map type with state behaviors: #{'_entry', '_react', '_exit'}.
-activate(Actions, Key, Value, State) when is_map(Actions) ->
-    Value1 = maps:merge(Value, Actions),
-    activate_(Key, Value1, State);
-activate(_Unknown, _Key, _Value, State) ->    
-    {error, unknown, State}.
-
-%% Value must be map type. Spawn state machine and link it as active
-%% attribute.
-%% 
-%% Todo: Every state may have own recovery settings. Recovery may be
-%% the initial state data for fast rollback.
-activate_(Key, Value, #{'_monitors' := M} = State) ->
-    Start = Value#{'_parent' => self(), '_surname' => Key},
-    {ok, Pid} = start_link(Start),
-    Recovery = maps:get('_recovery', Start, undefined),
-    Monitors = M#{Pid => {Key, Recovery}},
-    {process, Pid, State#{Key => {link, Pid, Pid}, '_monitors' := Monitors}}.
-
-%% Try to retrieve data or external actor, and attach to attribute of
-%% current actor. Cache data if fetch_link retrun {data, Data, State}.
-attach(Key, #{'_states' := Links} = State) ->
-    {Type, Data, State1} = fetch_link(Key, Links, State),
-    attach(Type, Data, Key, State1);
-attach(_, State) ->
-    {error, undefined, State}.
-
-%% attach function to an active attribute.
-attach(function, Func, Key, State) ->
-    {function, Func, State#{Key => {function, Func}}};
-%% Process is pid or registered name of a process.
-attach(process, Process, Key, #{'_monitors' := M} = State) ->
-    Mref = monitor(process, Process),
-    Recovery = maps:get('_link_recovery', State, undefined),
-    M1 = M#{Mref => {Key, Recovery}},
-    NewState = State#{Key => {link, Process, Mref}, '_monitors' := M1},
-    {process, Process, NewState};
-%% state data to spawn link local child actor.
-attach(state, Data, Key, State) ->
-    activate(Key, Data, State);
-%% data only, copy it as initial value.
-attach(data, Data, Key, State) ->
-    {data, Data, State#{Key => Data}};
-%% Error or volatile data need not cache in attribute Key.
-attach(Type, Data, _Key, State) ->
-    {Type, Data, State}.
-
-%% -type state_d() :: state() | {state(), actions(), recovery()}.
-%% 
-%% -type result() :: {process, pid(), state()} |
-%%   {function, Func, state()} |
-%%   {state, state_d(), state()} |
-%%   {data, term(), state()} |
-%%   {Code, Data, state()} |
-%%   {error, term(), state()}.
-%%   
-%% If fetch link returned static data as {data, Data, State}, the Data
-%% may be cached in related attribute.
-%% 
-%% Links function type: -spec link_fun(tag(),
-%% state()) -> result().
-fetch_link(Key, {function, Links}, State) ->
-    Links(Key, State);
-%% Links pid type:
-%% send special command 'touch': {xlx, From, {xl_touch, Key}},
-%%   argument: Key :: tag(),
-%%   return: result() without last state() element.
-fetch_link(Key, {link, Links, _}, State) ->
-    {Sign, Result} = scall(Links, {xl_touch, Key}, State),
-    {Sign, Result, State};
-%% Links map type format:
-%% {ref, Registry :: (pid() | tag()), tag()} |
-%%   {state, state_d()} |
-%%   {data, term()}.
-%% return: {process, pid(), state()} | {state, state_d(), state()}
-%%     | {data, term(), state()} | {error, term(), state()}.
-fetch_link(Key, Links, State) ->
-    case maps:find(Key, Links) of
-        error ->
-            {error, undefined, State};
-        %% Registry may be path, process id or registered name of
-        %% register's process.
-        {ok, {ref, Registry, Id}} ->
-            relay(Registry, {xl_touch, Id}, State);
-        %% Type: state, process, function, data
-        {ok, {Type, Data}} ->
-            {Type, Data, State};
-        {ok, Data} ->  % Default behavior is cache data in attribute.
-            {data, Data, State}
     end.
 
 %%%===================================================================

@@ -454,6 +454,8 @@ coverage() ->
     
     {ok, P48} = xl:start(#{a => 1}),
     {ok, P49} = xl:start(#{aa => {ref, P48, a}}),
+    {data, 1} = xl:touch(P48, a),
+    {data, 1} = xl:touch([P49, aa]),
     {ok, 1} = xl:call([P49, aa], get),
     {stopped, normal} = xl:stop(P48),
     {ok, 1} = xl:call([P49, aa], get),
