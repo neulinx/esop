@@ -240,7 +240,8 @@
 %% 
 %% - normal: {xlx, From, Command} -> reply().
 %% - relay with path: {xlx, From, Path, Command} -> reply().
-%% - touch & activate command: {xlx, from(), xl_touch} -> touch_return().
+%% - touch & activate command:
+%%     {xlx, from(), Path, xl_touch | {xl_touch, Key}} -> touch_return().
 %% - wakeup event: xl_wakeup
 %% - hibernate command: xl_hibernate
 %% - stop command: xl_stop | {xl_stop, reason()}
@@ -459,9 +460,9 @@ call(Process, Path, Command, Timeout) ->
     end.
 
 scall(Process, Command, #{'_timeout' := Timeout}) ->
-    call(Process, [], Command, Timeout);
+    call(Process, Command, Timeout);
 scall(Process, Command, _) ->
-    call(Process, [], Command, ?DFL_TIMEOUT).
+    call(Process, Command, ?DFL_TIMEOUT).
 
 -spec cast(process() | path(), Message :: term()) -> 'ok'.
 cast([Process | Path], Command) ->
@@ -535,9 +536,7 @@ touch(Path, Key) ->
 
 -spec touch(path()) -> touch_return().
 touch(Path) ->
-    Key = lists:last(Path),
-    Process = lists:droplast(Path),
-    touch(Process, Key).
+    call(Path, xl_touch).
 
 %% --------------------------------------------------------------------
 %% API for internal data access.
@@ -662,6 +661,8 @@ relay(Path, Command, State) ->
     end.
 
 -spec relay(from(), path() | process(), Command :: term(), state()) -> result().
+relay(_, [Key], xl_touch, State) ->
+    recall({xl_touch, Key}, State);
 relay(_, [Key], get, State) ->
     recall({get, Key}, State);
 relay(_, [Key], {put, Value}, State) ->
@@ -676,7 +677,7 @@ relay(From, [Key | Path], Command, State) ->
         {function, Func, S} ->
             Func({xlx, From, Path, Command}, S);
         {data, Package, S} ->  % Path is not empty.
-            case iterate(Command, Path, Package) of
+           case iterate(Command, Path, Package) of
                 error ->
                     {error, undefined, S};
                 {dirty, Data} ->
@@ -694,6 +695,13 @@ relay(From, Process, Command, State) ->  % pid or registered name.
 iterate(_, _, Container) when not is_map(Container) ->
     {error, badarg};
 iterate({xl_touch, Key}, [], Container) ->
+    case maps:find(Key, Container) of
+        {ok, Value} ->  % For static data, cache it in Key.
+            {data, Value};
+        error ->
+            error
+    end;
+iterate(xl_touch, [Key], Container) ->
     case maps:find(Key, Container) of
         {ok, Value} ->  % For static data, cache it in Key.
             {data, Value};
@@ -725,8 +733,9 @@ iterate(Command, [Key | Path], Container) ->
 %% Helper functions for active attribute access.
 %% --------------------------------------------------------------------
 %% Data types of attributes:
-%% {link, pid(), identifier()} | {ref, path() | process(), tag()} |
-%%   {state, {state(), actions()}} | {state, state()} | Value :: term().
+%% {link, pid(), identifier()} |
+%% {ref, path() | process()} | {ref, {path() | process(), tag()}} |
+%% {state, {state(), actions()}} | {state, state()} | Value :: term().
 %% when actions() :: state | module() | Module :: binary() | Actions :: map().
 -spec activate(tag(), state()) -> active_return().
 activate(Key, State) ->
@@ -739,8 +748,11 @@ activate(Key, State) ->
             activate(Key, S, State);
         %% Registry may be path, process id or registered name of
         %% register's process.
-        {ok, {ref, Registry, Id}} ->
-            {Type, Data, S} = relay(Registry, {xl_touch, Id}, State),
+        {ok, {ref, {Path, Id}}} ->
+            {Type, Data} = scall(Path, {xl_touch, Id}, State),
+            attach(Type, Data, Key, State);
+        {ok, {ref, Path}} ->
+            {Type, Data, S} = relay(Path, xl_touch, State),
             attach(Type, Data, Key, S);
         {ok, Value} ->
             {data, Value, State};
@@ -807,6 +819,13 @@ attach(state, Data, Key, State) ->
 %% data only, copy it as initial value.
 attach(data, Data, Key, State) ->
     {data, Data, State#{Key => Data}};
+%% reference type, may cause recurisively request.
+attach(ref, {Path, Id}, Key, State) ->  % external reference.
+    {Code, Result} = scall(Path, {xl_touch, Id}, State),
+    attach(Code, Result, Key, State);
+attach(ref, Path, Key, State) ->  % internal reference.
+    {Code, Result, S} = relay(Path, xl_touch, State),
+    attach(Code, Result, Key, S);
 %% Error or volatile data need not cache in attribute Key.
 attach(Type, Data, _Key, State) ->
     {Type, Data, State}.
@@ -833,7 +852,7 @@ fetch_link(Key, {link, Links, _}, State) ->
     {Sign, Result} = scall(Links, {xl_touch, Key}, State),
     {Sign, Result, State};
 %% Links map type format:
-%% {ref, Registry :: (pid() | tag()), tag()} |
+%% {ref, path()} |
 %%   {state, state_d()} |
 %%   {data, term()}.
 %% return: {process, pid(), state()} | {state, state_d(), state()}
@@ -842,11 +861,7 @@ fetch_link(Key, Links, State) ->
     case maps:find(Key, Links) of
         error ->
             {error, undefined, State};
-        %% Registry may be path, process id or registered name of
-        %% register's process.
-        {ok, {ref, Registry, Id}} ->
-            relay(Registry, {xl_touch, Id}, State);
-        %% Type: state, process, function, data
+        %% Type: state, process, function, data, reference.
         {ok, {Type, Data}} ->
             {Type, Data, State};
         {ok, Data} ->  % Default behavior is cache data in attribute.
@@ -1193,6 +1208,9 @@ handle_halt(Id, Throw, #{'_monitors' := M} = State) ->
 
 %% Retrieve data, activate or peek the attribute, like 'touch' command
 %% in bash shell.
+%% If there is no attribute name, give the state pid.
+recall(xl_touch, State) ->
+    {process, self(), State};
 recall({xl_touch, Key}, State) ->
     activate(Key, State);
 %% Normal case data fetching.
