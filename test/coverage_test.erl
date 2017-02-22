@@ -452,7 +452,14 @@ coverage() ->
     end,
     
     {ok, P48} = xl:start(#{a => 1, b => #{c => 2}}),
-    {ok, P49} = xl:start(#{aa => {ref, {P48, a}},
+    F49 = fun(p2, S) ->
+                  {ref, [p1, a], S};
+             (_, S) ->
+                  {error, undefined, S}
+          end,
+    {ok, P49} = xl:start(#{'_states' => {function, F49},
+                           p1 => {link, P48, undefined},
+                           aa => {ref, {P48, a}},
                            bb => {ref, {[P48, b], c}},
                            cc => {ref, {[P48, b], d}},
                            dd => {ref, P48}}),
@@ -462,6 +469,8 @@ coverage() ->
     {ok, 2} = xl:call([P49, bb], get),
     {error, undefined} = xl:call([P49, cc], get),
     {ok, 2} = xl:call([P49, dd, b, c], get),
+    {ok, 2} = xl:call([P49, p1, b, c], get),
+    {ok, 1} = xl:call([P49, p2], get),
     {stopped, normal} = xl:stop(P48),
     {ok, 1} = xl:call([P49, aa], get),
     {stopped, normal} = xl:stop(P49).
