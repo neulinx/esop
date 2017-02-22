@@ -25,7 +25,7 @@
 -export([call/2, call/3, call/4, cast/2, cast/3, reply/2]).
 -export([subscribe/1, subscribe/2, unsubscribe/2, notify/2]).
 -export([touch/1, touch/2]).
--export([relay/3, relay/4, activate/2, activate/3]).
+-export([relay/3, relay/4, activate/2, attach/4]).
 -export([get/2, get_raw/2, get_all/1, put/3, delete/2, delete/3]).
 
 %% -------------------------------------------------------------------
@@ -587,14 +587,6 @@ get_all(State) ->
     {ok, maps:filter(Pred, State), State}.
 
 -spec put(tag(), Value :: term(), state()) -> {'ok', 'done', state()}.
-put(Key, {process, Process}, State) ->
-    S = unlink(Key, State, true),
-    {process, _, S1} = attach(process, Process, Key, S),
-    {ok, done, S1};
-put(Key, {function, Func}, State) ->
-    S = unlink(Key, State, true),
-    {function, _, S1} = attach(function, Func, Key, S),
-    {ok, done, S1};
 put(Key, Value, State) ->
     S = unlink(Key, State, true),
     {ok, done, S#{Key => Value}}.
@@ -744,28 +736,13 @@ activate(Key, State) ->
             {process, Pid, State};
         {ok, {function, Func}} ->
             {function, Func, State};
-        {ok, {state, S}} ->
-            activate(Key, S, State);
-        %% Registry may be path, process id or registered name of
-        %% register's process.
-        {ok, {ref, {Path, Id}}} ->
-            {Type, Data} = scall(Path, {xl_touch, Id}, State),
+        {ok, {Type, Data}} ->
             attach(Type, Data, Key, State);
-        {ok, {ref, Path}} ->
-            {Type, Data, S} = relay(Path, xl_touch, State),
-            attach(Type, Data, Key, S);
         {ok, Value} ->
             {data, Value, State};
         error ->  % not found, try to activate data in '_states'.
             attach(Key, State)
     end.
-
--spec activate(tag(), state_d(), state()) -> active_return().
-activate(Key, {S, Actions}, State) ->
-    activate(Actions, Key, S, State);
-activate(Key, Value, State) ->
-    Actions = maps:get('_actions', Value, state),
-    activate(Actions, Key, Value, State).
 
 %% Intermediate function to bind behaviors with state.
 activate(state, Key, Value, State) ->
@@ -803,6 +780,7 @@ attach(Key, #{'_states' := Links} = State) ->
 attach(_, State) ->
     {error, undefined, State}.
 
+-spec attach(tag(), Data :: term(), Key :: term(), state()) -> active_return().
 %% attach function to an active attribute.
 attach(function, Func, Key, State) ->
     {function, Func, State#{Key => {function, Func}}};
@@ -814,8 +792,11 @@ attach(process, Process, Key, #{'_monitors' := M} = State) ->
     NewState = State#{Key => {link, Process, Mref}, '_monitors' := M1},
     {process, Process, NewState};
 %% state data to spawn link local child actor.
+attach(state, {Data, Actions}, Key, State) ->
+    activate(Actions, Key, Data, State);
 attach(state, Data, Key, State) ->
-    activate(Key, Data, State);
+    Actions = maps:get('_actions', Data, state),
+    activate(Actions, Key, Data, State);
 %% data only, copy it as initial value.
 attach(data, Data, Key, State) ->
     {data, Data, State#{Key => Data}};
@@ -1320,7 +1301,7 @@ transfer(Fsm, Output, Recovery) ->
                  end,
             %% Mark state in FSM and pass output as input.
             S2 = S1#{'_report' => true, '_of_fsm' => true},
-            {process, Pid, F3} = activate('_state', S2, F2),
+            {process, Pid, F3} = attach(state, S2, '_state', F2),
             F4 = F3#{'_status' := running},
             %% relay the cached messages in failover status.
             case maps:find('_pending_queue', F4) of
