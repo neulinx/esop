@@ -94,7 +94,7 @@
               tag/0,
               message/0,
               reply/0]).
-%% State attributes.
+%% State attributes. Raw data cannot support tuple type.
 -type state() :: #{
              '_entry' => entry(),
              '_react' => react(),
@@ -145,37 +145,64 @@
             } |         % Header part, common attributes.
                  map(). % Body part, data payload of the actor.
 
-%% Definition of gen_server server.
+%%%% Definition of gen_server.
 -type server_name() :: {local, atom()} |
                        {global, atom()} |
                        {via, atom(), term()}.
--type process() :: pid() | (LocalName :: atom()).
--type from() :: {To :: process(), Tag :: identifier()}.
 -type start_ret() ::  {'ok', pid()} | 'ignore' | {'error', term()}.
 -type start_opt() :: {'timeout', Time :: timeout()} |
                      {'spawn_opt', [proc_lib:spawn_option()]}.
+
+%%%% Identifiers.
+-type process() :: pid() | (LocalName :: atom()).
+-type tag() :: atom() | string() | binary() | integer().
+-type path() :: [process() | tag()].
+-type target() :: process() | path().
+-type from() :: {To :: process(), Tag :: identifier()}.
+%% Vector is set of dimentions. Raw data does not support tuple type,
+%% and list type is used. But string type in Erlang is list type
+%% too. Flat states map may confused by list type vector. So vectors
+%% in state map is tuple type.
+-type vector() :: {GlobalEdge :: tag()} |
+                  {Vetex :: tag(), Edge :: tag()}.
+%% In state, '_sign' may be relative as tag() type or absolute as
+%% vector() type.
+-type sign() :: vector() | tag().
 -type monitor() :: {tag(), recovery()}.
--type monitors() :: #{identifier() => monitor()}.
+
+%%%% attributes
+%% There is no atomic or string type in raw data. Such strings are
+%% all binary type as <<"AtomOrString">>.
 -type active_key() :: {'link', process(), identifier()} |
                       {'function', function()}.
 -type attribute() :: {'link', process(), identifier()} |
                      {'function', function()} |
                      {'state', state_d()} |
-                     refer() |
+                     refers() |
                      term().
--type states_map() :: #{vector() => state()}.
--type links_map() :: #{Key :: tag() => attribute()}.
+%% Reference of another actor's attribute.
+-type refer() :: {'refer', path() | {target(), tag()}}.
+-type redirect() :: {'redirect', target()}.
+-type skip() :: {'redirect', 'undefined'}.
+-type refers() :: refer() | redirect() | skip().
+-type monitors() :: #{identifier() => monitor()}.
 %% If vector() was list, links_map contains string type of attribute
 %% name is conflict with states_map().
 -type states() :: active_key() | states_map() | links_map().
-%% Reference of another actor's attribute.
--type refer() :: {'ref', Registry :: (process() | path()), Id :: tag()}.
+-type states_map() :: #{vector() => state()}.
+-type links_map() :: #{Key :: tag() => attribute()}.
 %% State data with overrided actions and recovery.
-%% Todo: raw data cannot support tuple type.
 -type state_d() :: state() | {state(), actions()}.
-%% Common type for key, id, name or tag.
--type tag() :: atom() | string() | binary() | integer().
--type path() :: [process() | tag()].
+-type actions() :: 'state' | module() | binary() | state_actions().
+-type state_actions() :: #{'_entry' => entry(),
+                           '_exit' => exit(),
+                           '_react' => react()}.
+%% There is a potential recovery option 'undefined' as default
+%% recovery mode, crashed active attribute may be recovered by next
+%% 'touch'. Actually tag() is <<"restart">> or <<"rollback">>.
+-type recovery() :: integer() | vector() | tag().
+
+%%%% Messages and results.
 -type request() :: {'xlx', from(), Command :: term()} |
                    {'xlx', from(), Path :: list(), Command :: term()}.
 -type notification() :: {'xlx', Notification :: term()}.
@@ -194,23 +221,6 @@
                   'failover' |
                   tag().
 -type reason() :: 'normal' | 'shutdown' | {'shutdown', term()} | term().
-%% In state, '_sign' may be relative as tag() type or absolute as
-%% vector() type.
--type sign() :: vector() | tag().
-%% entry action should be compatible with gen_server:init/1.
-%% Notice: 'ignore' is not support.
--type entry_return() :: {'ok', state()} |
-                        {'ok', state(), timeout()} |
-                        {'ok', state(), 'hibernate'} |
-                        {'stop', reason()} |
-                        {'stop', reason(), state()}.
--type entry() :: fun((state()) -> entry_return()).
--type exit() :: fun((state()) -> state()).
--type react() :: fun((message() | term(), state()) -> result()).
--type actions() :: 'state' | module() | binary() | state_actions().
--type state_actions() :: #{'_entry' => entry(),
-                           '_exit' => exit(),
-                           '_react' => react()}.
 -type touch_return() :: {process, pid()} |
                         {function, function()} |
                         {data, term()} |
@@ -221,18 +231,20 @@
                          {data, term(), state()} |
                          {tag(), term(), state()} |
                          {error, term(), state()}.
-%% There is a potential recovery option 'undefined' as default
-%% recovery mode, crashed active attribute may be recovered by next
-%% 'touch'. Actually tag() is <<"restart">> or <<"rollback">>.
--type recovery() :: integer() | vector() | tag().
-%% Vector is set of dimentions. Raw data does not support tuple type,
-%% and list type is used. But string type in Erlang is list type
-%% too. Flat states map may confused by list type vector. So vectors
-%% in state map is tuple type.
--type vector() :: {GlobalEdge :: tag()} |
-                  {Vetex :: tag(), Edge :: tag()}.
-%% There is no atomic or string type in raw data. Such strings are
-%% all binary type as <<"AtomOrString">>.
+
+%%%% Behaviours.
+%% entry action should be compatible with gen_server:init/1.
+%% Notice: 'ignore' is not support.
+-type entry_return() :: {'ok', state()} |
+                        {'ok', state(), timeout()} |
+                        {'ok', state(), 'hibernate'} |
+                        {'stop', reason()} |
+                        {'stop', reason(), state()}.
+-type entry() :: fun((state()) -> entry_return()).
+-type exit() :: fun((state()) -> state()).
+-type react() :: fun((message() | term(), state()) -> result()).
+
+%%%% Misc
 -type limit() :: non_neg_integer() | 'infinity'.
 
 %% --------------------------------------------------------------------
@@ -241,7 +253,7 @@
 %% - normal: {xlx, From, Command} -> reply().
 %% - relay with path: {xlx, From, Path, Command} -> reply().
 %% - touch & activate command:
-%%     {xlx, from(), Path, xl_touch | {xl_touch, Key}} -> touch_return().
+%%     {xlx, from(), Path, touch | {touch, Key}} -> touch_return().
 %% - wakeup event: xl_wakeup
 %% - hibernate command: xl_hibernate
 %% - stop command: xl_stop | {xl_stop, reason()}
@@ -435,13 +447,13 @@ reply(undefined, _) ->
     ok.
 
 %% Same as gen_server:call().
--spec call(process() | path(), Request :: term()) -> reply().
+-spec call(target(), Request :: term()) -> reply().
 call([Process | Path], Command) ->
     call(Process, Path, Command, infinity);
 call(Process, Command) ->
     call(Process, [], Command, infinity).
 
--spec call(process() | path(), Request :: term(), timeout()) -> reply().
+-spec call(target(), Request :: term(), timeout()) -> reply().
 call([Process | Path], Command, Timeout) ->
     call(Process, Path, Command, Timeout);
 call(Process, Command, Timeout) ->
@@ -464,7 +476,7 @@ scall(Process, Command, #{'_timeout' := Timeout}) ->
 scall(Process, Command, _) ->
     call(Process, Command, ?DFL_TIMEOUT).
 
--spec cast(process() | path(), Message :: term()) -> 'ok'.
+-spec cast(target(), Message :: term()) -> 'ok'.
 cast([Process | Path], Command) ->
     cast(Process, Path, Command);
 cast(Process, Command) ->
@@ -510,15 +522,15 @@ stop_(Process, Reason, Timeout) ->
             {error, timeout}
     end.
 
--spec subscribe(process() | path()) -> {'ok', reference()}.
+-spec subscribe(target()) -> {'ok', reference()}.
 subscribe(Process) ->
     subscribe(Process, self()).
 
--spec subscribe(process() | path(), process()) -> {'ok', reference()}.
+-spec subscribe(target(), process()) -> {'ok', reference()}.
 subscribe(Process, Pid) ->
     call(Process, {subscribe, Pid}).
 
--spec unsubscribe(process() | path(), reference()) -> 'ok'.
+-spec unsubscribe(target(), reference()) -> 'ok'.
 unsubscribe(Process, Ref) ->
     catch Process ! {xl_unsubscribe, Ref},
     ok.
@@ -529,14 +541,14 @@ notify(Process, Info) ->
     catch Process ! {xl_notify, Info},
     ok.
 
-%% Helper function for xl_touch command.
--spec touch(process() | path(), tag()) -> touch_return().
+%% Helper function for touch command.
+-spec touch(target(), tag()) -> touch_return().
 touch(Path, Key) ->
-    call(Path, {xl_touch, Key}).
+    call(Path, {touch, Key}).
 
 -spec touch(path()) -> touch_return().
 touch(Path) ->
-    call(Path, xl_touch).
+    call(Path, touch).
 
 %% --------------------------------------------------------------------
 %% API for internal data access.
@@ -635,7 +647,7 @@ unlink(Key, #{'_monitors' := M} = State, Stop) ->
 %% with similar functions call and cast, function relay is called
 %% inside actor process while call/cast is called outside the process.
 %% --------------------------------------------------------------------
--spec relay(path() | process(), Command :: term(), state()) -> result().
+-spec relay(target(), Command :: term(), state()) -> result().
 relay(Path, Command, State) ->
     Tag = make_ref(),
     case relay({self(), Tag}, Path, Command, State) of
@@ -652,9 +664,9 @@ relay(Path, Command, State) ->
             Done
     end.
 
--spec relay(from(), path() | process(), Command :: term(), state()) -> result().
-relay(_, [Key], xl_touch, State) ->
-    recall({xl_touch, Key}, State);
+-spec relay(from(), target(), Command :: term(), state()) -> result().
+relay(_, [Key], touch, State) ->
+    recall({touch, Key}, State);
 relay(_, [Key], get, State) ->
     recall({get, Key}, State);
 relay(_, [Key], {put, Value}, State) ->
@@ -686,14 +698,14 @@ relay(From, Process, Command, State) ->  % pid or registered name.
 
 iterate(_, _, Container) when not is_map(Container) ->
     {error, badarg};
-iterate({xl_touch, Key}, [], Container) ->
+iterate({touch, Key}, [], Container) ->
     case maps:find(Key, Container) of
         {ok, Value} ->  % For static data, cache it in Key.
             {data, Value};
         error ->
             error
     end;
-iterate(xl_touch, [Key], Container) ->
+iterate(touch, [Key], Container) ->
     case maps:find(Key, Container) of
         {ok, Value} ->  % For static data, cache it in Key.
             {data, Value};
@@ -726,7 +738,7 @@ iterate(Command, [Key | Path], Container) ->
 %% --------------------------------------------------------------------
 %% Data types of attributes:
 %% {link, pid(), identifier()} |
-%% {ref, path() | process()} | {ref, {path() | process(), tag()}} |
+%% refers(),
 %% {state, {state(), actions()}} | {state, state()} | Value :: term().
 %% when actions() :: state | module() | Module :: binary() | Actions :: map().
 -spec activate(tag(), state()) -> active_return().
@@ -801,11 +813,11 @@ attach(state, Data, Key, State) ->
 attach(data, Data, Key, State) ->
     {data, Data, State#{Key => Data}};
 %% reference type, may cause recurisively request.
-attach(ref, {Path, Id}, Key, State) ->  % external reference.
-    {Code, Result} = scall(Path, {xl_touch, Id}, State),
+attach(refer, {Path, Id}, Key, State) ->  % external reference.
+    {Code, Result} = scall(Path, {touch, Id}, State),
     attach(Code, Result, Key, State);
-attach(ref, Path, Key, State) ->  % internal reference.
-    {Code, Result, S} = relay(Path, xl_touch, State),
+attach(refer, Path, Key, State) ->  % internal reference.
+    {Code, Result, S} = relay(Path, touch, State),
     attach(Code, Result, Key, S);
 %% Error or volatile data need not cache in attribute Key.
 attach(Type, Data, _Key, State) ->
@@ -826,14 +838,14 @@ attach(Type, Data, _Key, State) ->
 fetch_link(Key, {function, Links}, State) ->
     Links(Key, State);
 %% Links pid type:
-%% send special command 'touch': {xlx, From, {xl_touch, Key}},
+%% send special command 'touch': {xlx, From, {touch, Key}},
 %%   argument: Key :: tag(),
 %%   return: result() without last state() element.
 fetch_link(Key, {link, Links, _}, State) ->
-    {Sign, Result} = scall(Links, {xl_touch, Key}, State),
+    {Sign, Result} = scall(Links, {touch, Key}, State),
     {Sign, Result, State};
 %% Links map type format:
-%% {ref, path()} |
+%% refers() |
 %%   {state, state_d()} |
 %%   {data, term()}.
 %% return: {process, pid(), state()} | {state, state_d(), state()}
@@ -982,7 +994,7 @@ next_state(Vector, {link, States, _}, Fsm) ->
     %% Internal data structure of States actor is same as States map.
     %% In special case, touch operation may make a cache of #{{From,
     %% To} => state()} in States.
-    case scall(States, {xl_touch, Vector}, Fsm) of
+    case scall(States, {touch, Vector}, Fsm) of
         {data, Data} ->  % Do not accept other types, only data.
             {Data, Fsm};
         _ ->
@@ -1190,9 +1202,9 @@ handle_halt(Id, Throw, #{'_monitors' := M} = State) ->
 %% Retrieve data, activate or peek the attribute, like 'touch' command
 %% in bash shell.
 %% If there is no attribute name, give the state pid.
-recall(xl_touch, State) ->
+recall(touch, State) ->
     {process, self(), State};
-recall({xl_touch, Key}, State) ->
+recall({touch, Key}, State) ->
     activate(Key, State);
 %% Normal case data fetching.
 recall({get, Key}, State) ->

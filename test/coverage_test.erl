@@ -357,24 +357,24 @@ coverage() ->
 
     S37 = #{a => 1, b => 2, c => #{d => 3}},
     {ok, P37} = xl:start(S37),
-    L38 = #{x => {ref, {P37, a}}},
+    L38 = #{x => {refer, {P37, a}}},
     {ok, P38} = xl:start(#{'_states' => L38}),
     {ok, 1} = xl:call(P38, {get, x}),
     {stopped, normal} = xl:stop(P38),
     {stopped, normal} = xl:stop(P37),
 
-    F39 = fun({xlx, _, [Key], xl_touch}, State) ->
+    F39 = fun({xlx, _, [Key], touch}, State) ->
                   {ok, Key, State}  % Data not cache in Key.
           end,
-    L39 = #{x => {ref, [register, y]},
-            y => {ref, [s37, b]},
-            z => {ref, [ss, c]},
-            e => {ref, [s37, c, e]},
+    L39 = #{x => {refer, [register, y]},
+            y => {refer, [s37, b]},
+            z => {refer, [ss, c]},
+            e => {refer, [s37, c, e]},
             a => {a, b, c},
             b => {a, b},
             s37 => {data, S37},
             register => {function, F39}},
-    {ok, P39} = xl:start(#{'_states' => L39, d => {ref, [s37, c, d]}}),
+    {ok, P39} = xl:start(#{'_states' => L39, d => {refer, [s37, c, d]}}),
     {ok, y} = xl:call(P39, {get, x}),
     {error, undefined} = xl:call(P39, {get, x, raw}),
     {ok, 2} = xl:call(P39, {get, y}),
@@ -453,16 +453,16 @@ coverage() ->
     
     {ok, P48} = xl:start(#{a => 1, b => #{c => 2}}),
     F49 = fun(p2, S) ->
-                  {ref, [p1, a], S};
+                  {refer, [p1, a], S};
              (_, S) ->
                   {error, undefined, S}
           end,
     {ok, P49} = xl:start(#{'_states' => {function, F49},
                            p1 => {link, P48, undefined},
-                           aa => {ref, {P48, a}},
-                           bb => {ref, {[P48, b], c}},
-                           cc => {ref, {[P48, b], d}},
-                           dd => {ref, P48}}),
+                           aa => {refer, {P48, a}},
+                           bb => {refer, {[P48, b], c}},
+                           cc => {refer, {[P48, b], d}},
+                           dd => {refer, P48}}),
     {data, 1} = xl:touch(P48, a),
     {data, 1} = xl:touch([P49, aa]),
     {ok, 1} = xl:call([P49, aa], get),
