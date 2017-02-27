@@ -22,11 +22,9 @@
 -export([start_link/1, start_link/2, start_link/3]).
 -export([start/1, start/2, start/3]).
 -export([stop/1, stop/2, stop/3]).
--export([call/2, call/3, call/4, cast/2, cast/3, reply/2]).
--export([subscribe/1, subscribe/2, unsubscribe/2, notify/2]).
--export([touch/1, touch/2]).
--export([relay/3, relay/4, activate/2, attach/4]).
--export([get/2, get_raw/2, get_all/1, put/3, delete/2, delete/3]).
+-export([call/2, call/3, call/4, cast/2, cast/3, reply/2, notify/2]).
+-export([invoke/2, invoke/3, invoke/4, appeal/2]).
+-export([activate/2, attach/4, remove/2, remove/3]).
 
 %% -------------------------------------------------------------------
 %% Macro definitions for default value. 
@@ -95,6 +93,10 @@
               message/0,
               reply/0]).
 %% State attributes.
+%% 
+%% System or runtime attributes should be atom type as internal
+%% attributes. Raw data cannot support tuple type, neither attribute
+%% name or value. Tuple type is system type for internal usage.
 -type state() :: #{
              '_entry' => entry(),
              '_react' => react(),
@@ -145,37 +147,64 @@
             } |         % Header part, common attributes.
                  map(). % Body part, data payload of the actor.
 
-%% Definition of gen_server server.
+%%%% Definition of gen_server.
 -type server_name() :: {local, atom()} |
                        {global, atom()} |
                        {via, atom(), term()}.
--type process() :: pid() | (LocalName :: atom()).
--type from() :: {To :: process(), Tag :: identifier()}.
 -type start_ret() ::  {'ok', pid()} | 'ignore' | {'error', term()}.
 -type start_opt() :: {'timeout', Time :: timeout()} |
                      {'spawn_opt', [proc_lib:spawn_option()]}.
+
+%%%% Identifiers.
+-type process() :: pid() | (LocalName :: atom()).
+-type tag() :: atom() | string() | binary() | integer().
+-type path() :: [process() | tag()].
+-type target() :: process() | path().
+-type from() :: {To :: process(), Tag :: identifier()} | 'undefined'.
+%% Vector is set of dimentions. Raw data does not support tuple type,
+%% and list type is used. But string type in Erlang is list type
+%% too. Flat states map may confused by list type vector. So vectors
+%% in state map is tuple type.
+-type vector() :: {GlobalEdge :: tag()} |
+                  {Vetex :: tag(), Edge :: tag()}.
+%% In state, '_sign' may be relative as tag() type or absolute as
+%% vector() type.
+-type sign() :: vector() | tag().
 -type monitor() :: {tag(), recovery()}.
--type monitors() :: #{identifier() => monitor()}.
+
+%%%% attributes
+%% There is no atomic or string type in raw data. Such strings are
+%% all binary type as <<"AtomOrString">>.
 -type active_key() :: {'link', process(), identifier()} |
                       {'function', function()}.
 -type attribute() :: {'link', process(), identifier()} |
                      {'function', function()} |
                      {'state', state_d()} |
-                     refer() |
+                     refers() |
                      term().
--type states_map() :: #{vector() => state()}.
--type links_map() :: #{Key :: tag() => attribute()}.
+%% Reference of another actor's attribute.
+-type refer() :: {'refer', path() | {target(), tag()}}.
+-type redirect() :: {'redirect', target()}.
+-type skip() :: {'redirect', 'undefined'}.
+-type refers() :: refer() | redirect() | skip().
+-type monitors() :: #{identifier() => monitor()}.
 %% If vector() was list, links_map contains string type of attribute
 %% name is conflict with states_map().
 -type states() :: active_key() | states_map() | links_map().
-%% Reference of another actor's attribute.
--type refer() :: {'ref', Registry :: (process() | path()), Id :: tag()}.
+-type states_map() :: #{vector() => state()}.
+-type links_map() :: #{Key :: tag() => attribute()}.
 %% State data with overrided actions and recovery.
-%% Todo: raw data cannot support tuple type.
 -type state_d() :: state() | {state(), actions()}.
-%% Common type for key, id, name or tag.
--type tag() :: atom() | string() | binary() | integer().
--type path() :: [process() | tag()].
+-type actions() :: 'state' | module() | binary() | state_actions().
+-type state_actions() :: #{'_entry' => entry(),
+                           '_exit' => exit(),
+                           '_react' => react()}.
+%% There is a potential recovery option 'undefined' as default
+%% recovery mode, crashed active attribute may be recovered by next
+%% 'touch'. Actually tag() is <<"restart">> or <<"rollback">>.
+-type recovery() :: integer() | vector() | tag().
+
+%%%% Messages and results.
 -type request() :: {'xlx', from(), Command :: term()} |
                    {'xlx', from(), Path :: list(), Command :: term()}.
 -type notification() :: {'xlx', Notification :: term()}.
@@ -184,7 +213,8 @@
                 'data' | 'process' | 'function' | tag().  % etc.
 -type result() :: {code(), state()} |
                   {code(), term(), state()} |
-                  {code(), Stop :: reason(), Reply :: term(), state()}.
+                  {code(), Stop :: reason(), Reply :: term(), state()} |
+                  {code(), Reply :: term(), state(), 'hibernate'}.
 -type output() :: {code(), Result :: term()}.
 -type reply() :: output() | code() | term().
 -type status() :: 'running' |
@@ -194,9 +224,13 @@
                   'failover' |
                   tag().
 -type reason() :: 'normal' | 'shutdown' | {'shutdown', term()} | term().
-%% In state, '_sign' may be relative as tag() type or absolute as
-%% vector() type.
--type sign() :: vector() | tag().
+-type active_return() :: {process, pid(), state()} |
+                         {function, function(), state()} |
+                         {data, term(), state()} |
+                         {tag(), term(), state()} |
+                         {error, term(), state()}.
+
+%%%% Behaviours.
 %% entry action should be compatible with gen_server:init/1.
 %% Notice: 'ignore' is not support.
 -type entry_return() :: {'ok', state()} |
@@ -207,41 +241,13 @@
 -type entry() :: fun((state()) -> entry_return()).
 -type exit() :: fun((state()) -> state()).
 -type react() :: fun((message() | term(), state()) -> result()).
--type actions() :: 'state' | module() | binary() | state_actions().
--type state_actions() :: #{'_entry' => entry(),
-                           '_exit' => exit(),
-                           '_react' => react()}.
--type touch_return() :: {process, pid()} |
-                        {function, function()} |
-                        {data, term()} |
-                        {tag(), term()} |
-                        {error, term()}.
--type active_return() :: {process, pid(), state()} |
-                         {function, function(), state()} |
-                         {data, term(), state()} |
-                         {tag(), term(), state()} |
-                         {error, term(), state()}.
-%% There is a potential recovery option 'undefined' as default
-%% recovery mode, crashed active attribute may be recovered by next
-%% 'touch'. Actually tag() is <<"restart">> or <<"rollback">>.
--type recovery() :: integer() | vector() | tag().
-%% Vector is set of dimentions. Raw data does not support tuple type,
-%% and list type is used. But string type in Erlang is list type
-%% too. Flat states map may confused by list type vector. So vectors
-%% in state map is tuple type.
--type vector() :: {GlobalEdge :: tag()} |
-                  {Vetex :: tag(), Edge :: tag()}.
-%% There is no atomic or string type in raw data. Such strings are
-%% all binary type as <<"AtomOrString">>.
+
+%%%% Misc
 -type limit() :: non_neg_integer() | 'infinity'.
 
 %% --------------------------------------------------------------------
 %% Message format:
 %% 
-%% - normal: {xlx, From, Command} -> reply().
-%% - relay with path: {xlx, From, Path, Command} -> reply().
-%% - touch & activate command:
-%%     {xlx, from(), Path, xl_touch | {xl_touch, Key}} -> touch_return().
 %% - wakeup event: xl_wakeup
 %% - hibernate command: xl_hibernate
 %% - stop command: xl_stop | {xl_stop, reason()}
@@ -254,6 +260,45 @@
 %%         {xl_retry, Key, <<"restart">>}  % for active attribute.
 %% - command to notify all subscribers: {xl_notify, Notification}.
 %%
+%% Request format: {xlx, From, To, Command} -> reply().
+%%   - xlx, tag of sop request.
+%%   - From, should be form of {SourcePid, reference()}. If From is undefined,
+%%     response is not necessary, same as notification.
+%%   - To, relative path to the target actor, should be list type.
+%%     - [], path to current actor root;
+%%     - [<<".">>], path to current actor root, do not relay to state actor;
+%%     - [Key], path to attribute by name Key;
+%%     - [NextHop, Hops], relay to next hop.
+%%   - Command, any form of request to target.
+%%
+%% Predefined commands:
+%% - touch and activate: touch -> touch_return.
+%%   - Start actor by value of the Key or last hop of the Path.
+%%   - Initialize the value by states.
+%%   - Return the activated value of the Key with type.
+%%   - Return current pid() if Key is not present.
+%% - get: get -> {code(), Result, state()}.
+%%   - Code is preferred 'ok' or 'error'.
+%%   - If value of Key is process or function, get request relay to process
+%%     or call the function.
+%%   - get request always fire activate action of the Key.
+%%   - get without Key parameter may return all data of current actor,
+%%     get rid of system data (Attribute name type is atom). 
+%% - get raw data without touch: get_raw -> term().
+%%   - raw data of the Key, or all data of the actor.
+%%   - get_raw do not trigger activate action, just return data as is.
+%% - update: {put, Value} -> {code(), Result, state()}.
+%%   - put operation may create new Key or update existed Key;
+%%   - Response is preferred {ok, done, state()} or {error, Error, state()};
+%%   - put perform replace operation on data;
+%% - patch: {patch, Value} -> {code(), Result, state()}.
+%%   - patch operation may create new Key or update existed Key;
+%%   - Value should be map type;
+%%   - Response is preferred {ok, done, state()} or {error, Error, state()};
+%%   - patch perform merge operation on data;
+%% - delete: delete -> {code(), Result, state()}.
+%%   - Response is preferred {ok, done, state()} or {error, Error, state()};
+%%
 %% Predefined signs:
 %% Generally, all internal signs are atom type.
 %% - exceed_max_steps: run out of steps limit.  fall through exception.
@@ -262,7 +307,11 @@
 %% - halt: machine stop but process is still alive.
 %% - abort: FSM is not finished, exit by exception or command.
 %% --------------------------------------------------------------------
-
+-type command() :: 'touch' | 'get' | 'get_raw' | 'delete' |
+                   {'put', term()} | {'patch', term()} |
+                   {'subscribe', process()} | {'unsubscribe', reference()} |
+                   {'xl_notify', term()} |
+                   'xl_stop' | {'xl_stop', term()} | 'xl_hibernate'.
 %% --------------------------------------------------------------------
 %% gen_server callbacks.
 %% --------------------------------------------------------------------
@@ -435,13 +484,13 @@ reply(undefined, _) ->
     ok.
 
 %% Same as gen_server:call().
--spec call(process() | path(), Request :: term()) -> reply().
+-spec call(target(), Request :: term()) -> reply().
 call([Process | Path], Command) ->
     call(Process, Path, Command, infinity);
 call(Process, Command) ->
     call(Process, [], Command, infinity).
 
--spec call(process() | path(), Request :: term(), timeout()) -> reply().
+-spec call(target(), Request :: term(), timeout()) -> reply().
 call([Process | Path], Command, Timeout) ->
     call(Process, Path, Command, Timeout);
 call(Process, Command, Timeout) ->
@@ -464,7 +513,7 @@ scall(Process, Command, #{'_timeout' := Timeout}) ->
 scall(Process, Command, _) ->
     call(Process, Command, ?DFL_TIMEOUT).
 
--spec cast(process() | path(), Message :: term()) -> 'ok'.
+-spec cast(target(), Message :: term()) -> 'ok'.
 cast([Process | Path], Command) ->
     cast(Process, Path, Command);
 cast(Process, Command) ->
@@ -510,135 +559,79 @@ stop_(Process, Reason, Timeout) ->
             {error, timeout}
     end.
 
--spec subscribe(process() | path()) -> {'ok', reference()}.
-subscribe(Process) ->
-    subscribe(Process, self()).
-
--spec subscribe(process() | path(), process()) -> {'ok', reference()}.
-subscribe(Process, Pid) ->
-    call(Process, {subscribe, Pid}).
-
--spec unsubscribe(process() | path(), reference()) -> 'ok'.
-unsubscribe(Process, Ref) ->
-    catch Process ! {xl_unsubscribe, Ref},
-    ok.
-
 %% The function generate notification send to all subscribers.
 -spec notify(process(), Info :: term()) -> 'ok'.
 notify(Process, Info) ->
     catch Process ! {xl_notify, Info},
     ok.
 
-%% Helper function for xl_touch command.
--spec touch(process() | path(), tag()) -> touch_return().
-touch(Path, Key) ->
-    call(Path, {xl_touch, Key}).
-
--spec touch(path()) -> touch_return().
-touch(Path) ->
-    call(Path, xl_touch).
-
-%% --------------------------------------------------------------------
-%% API for internal data access.
-%% --------------------------------------------------------------------
-%% Request of 'get' is default to fetch all data (without internal
-%% attributes).
--spec get(tag(), state()) -> {'ok', term(), state()} |
-                             {'error', term(), state()}.
-get(Key, State) ->
-    case activate(Key, State) of
-        {data, Data, State1} ->
-            {ok, Data, State1};
-        {process, Pid, State1} ->
-            {Sign, Result} = scall(Pid, get, State1),
-            {Sign, Result, State1};
-        {function, Func, State1} ->
-            Func({get, Key}, State1);
-        OkOrError ->
-            OkOrError
-    end.
-
-%% Raw data in state attributes map.
--spec get_raw(tag(), state()) -> {'ok', term(), state()} |
-                                 {'error', 'undefined', state()}.
-get_raw(Key, State) ->
-    case maps:find(Key, State) of
-        {ok, Value} ->
-            {ok, Value, State};
-        error ->
-            {error, undefined, State}
-    end.
-
-%% Pick all exportable attributes, exclude active attributes or
-%% attributes with atom type name.
--spec get_all(state()) -> {'ok', map(), state()}.
-get_all(State) ->
-    Pred = fun(_, {link, _, _}) ->
-                   false;
-              (_, {function, _}) ->
-                   false;
-              (Key, _) when is_atom(Key) ->
-                   false;
-              (Key, _) when is_tuple(Key) ->
-                   false;
-              (_, _) ->
-                   true
-           end,
-    {ok, maps:filter(Pred, State), State}.
-
--spec put(tag(), Value :: term(), state()) -> {'ok', 'done', state()}.
-put(Key, Value, State) ->
-    S = unlink(Key, State, true),
-    {ok, done, S#{Key => Value}}.
-
--spec delete(tag(), state()) -> {'ok', 'done', state()}.
-delete(Key, State) ->
-    delete(Key, State, true).
-
-%% It is ugly, no word.
--spec delete(tag(), state(), boolean()) -> {'ok', 'done', state()}.
-delete(Key, State, Stop) ->
-    S = unlink(Key, State, Stop),
-    {ok, done, maps:remove(Key, S)}.
-
-unlink(Key, #{'_monitors' := M} = State, Stop) ->
-    case maps:find(Key, State) of
-        {ok, {link, Pid, Pid}} ->
-            unlink(Pid),
-            M1 = maps:remove(Pid, M),
-            case Stop of
-                true ->
-                    catch Pid ! {xl_stop, shutdown};
-                false ->
-                    ok
-            end,
-            State#{'_monitors' := M1};
-        {ok, {link, _, Monitor}} ->
-            demonitor(Monitor, [flush]),
-            M1 = maps:remove(Monitor, M),
-            State#{'_monitors' := M1};
-        {ok, _} ->
-            State;
-        error ->
-            State
-    end.
-
 %% --------------------------------------------------------------------
 %% Process messages with path, when react function does not handle it.
 %%
 %% Hierarchical data in a state data map can only support
-%% get/put/delete operations.
+%% touch/get/put/delete operations.
 %%
-%% relay/3 is sync operation that wait for expected reply. Instant
-%% return version of relay is relay/4 with first parameter
-%% 'undefined': relay(undefined, Path, Notification, State). Compare
-%% with similar functions call and cast, function relay is called
-%% inside actor process while call/cast is called outside the process.
+%% invoke/3 is sync operation that wait for expected reply. Instant
+%% return version is invoke/4 with first parameter 'undefined':
+%% 
+%% invoke(undefined, Path, Notification, State).
+%%
+%% Compare with similar functions call and cast, function invoke is
+%% called inside actor process while call/cast is called outside the
+%% process.
 %% --------------------------------------------------------------------
--spec relay(path() | process(), Command :: term(), state()) -> result().
-relay(Path, Command, State) ->
+%%%% request to the actor without special key.
+-spec invoke(command(), state()) -> result().
+%% May be request for far far away source for shortcut link.
+invoke(touch, State) ->
+    {process, self(), State};
+%% get request to root return all data without internal data.
+invoke(get, State) ->
+    Pred = fun(Key, Value) when is_atom(Key) orelse
+                                is_tuple(Key) orelse
+                                is_tuple(Value) ->
+                   false;
+              (_, _) ->
+                   true
+           end,
+    {ok, maps:filter(Pred, State), State};
+%% Retrieve all raw data of state.
+invoke(get_raw, State) ->
+    {ok, State, State};
+%% @notice: patch may override internal data.
+invoke({patch, Patch}, State) ->
+    Update = fun(K, V, S) ->
+                     {ok, done, S1} = invoke(undefined, [K], {put, V}, S),
+                     S1
+             end,
+    NewS = maps:fold(Update, State, Patch),
+    {ok, done, NewS};
+invoke({subscribe, Pid}, State) ->
+    Subs = maps:get('_subscribers', State, #{}),
+    Mref = monitor(process, Pid),
+    Subs1 = Subs#{Mref => Pid},
+    {ok, Mref, State#{'_subscribers' => Subs1}};
+%% Unsubscribe operation may be triggered by request or notification
+%% with different message format: {xlx, From, Path, {unsubscribe,
+%% Ref}} vs {unsubscribe, Ref}.
+invoke({unsubscribe, Ref}, State) ->
+    {ok, NewState} = appeal({unsubscribe, Ref}, State),
+    {ok, done, NewState};
+%% Interactive stop.
+invoke({xl_stop, Reason}, State) ->
+    {ok, Reason, done, State};
+invoke(xl_stop, State) ->
+    {ok, normal, done, State};
+invoke(xl_hibernate, State) ->
+    {ok, done, State, hibernate};
+invoke(_, State) ->
+    {error, unknown, State}.
+
+%% Synchoronous version of request, wait for response till timeout.
+-spec invoke(target(), Command :: term(), state()) -> result().
+invoke(Path, Command, State) ->
     Tag = make_ref(),
-    case relay({self(), Tag}, Path, Command, State) of
+    case invoke({self(), Tag}, Path, Command, State) of
         {ok, S} ->
             Timeout = maps:get('_timeout', S, ?DFL_TIMEOUT),
             receive
@@ -652,26 +645,36 @@ relay(Path, Command, State) ->
             Done
     end.
 
--spec relay(from(), path() | process(), Command :: term(), state()) -> result().
-relay(_, [Key], xl_touch, State) ->
-    recall({xl_touch, Key}, State);
-relay(_, [Key], get, State) ->
-    recall({get, Key}, State);
-relay(_, [Key], {put, Value}, State) ->
-    recall({put, Key, Value}, State);
-relay(_, [Key], delete, State) ->
-    recall({delete, Key}, State);
-relay(From, [Key | Path], Command, State) ->
+%% Asynchoronous version of request, return immediately.
+-spec invoke(from(), target(), Command :: term(), state()) -> result().
+invoke(_, [], Command, State) ->
+    invoke(Command, State);
+invoke(_, [<<".">>], Command, State) ->
+    invoke(Command, State);
+invoke(_, [Key], touch, State) ->
+    activate(Key, State);
+invoke(_, [Key], get_raw, State) ->
+    case maps:find(Key, State) of
+        {ok, Value} ->
+            {ok, Value, State};
+        error ->
+            {error, undefined, State}
+    end;
+invoke(_, [Key], {put, Value}, State) ->
+    S = remove(Key, State, true),
+    {ok, done, S#{Key => Value}};
+invoke(_, [Key], delete, State) ->
+    S = remove(Key, State, true),
+    {ok, done, S};
+invoke(From, [Key | Path], Command, State) ->
     case activate(Key, State) of
-        {process, Pid, S} ->
+        {process, Pid, S} ->  % relay request to the linked actor.
             Pid ! {xlx, From, Path, Command},
             {ok, S};
-        {function, Func, S} ->
+        {function, Func, S} ->  % relay request to message handler.
             Func({xlx, From, Path, Command}, S);
-        {data, Package, S} ->  % Path is not empty.
+        {data, Package, S} ->  % traverse local forest.
            case iterate(Command, Path, Package) of
-                error ->
-                    {error, undefined, S};
                 {dirty, Data} ->
                     {ok, done, S#{Key => Data}};
                 {Code, Value} ->  % {ok, Value} | {error, Error}.
@@ -680,28 +683,21 @@ relay(From, [Key | Path], Command, State) ->
         Error ->
             Error
     end;
-relay(From, Process, Command, State) ->  % pid or registered name.
+%% This is a backdoor for request without connection.
+invoke(From, Process, Command, State) ->  % pid or registered name.
     Process ! {xlx, From, [], Command},
     {ok, State}.
 
-iterate(_, _, Container) when not is_map(Container) ->
+iterate(touch, [], Data) ->
+    {data, Data};
+iterate(get, [], Data) ->
+    {ok, Data};
+iterate(get_raw, [], Data) ->
+    {ok, Data};
+iterate({patch, V1}, [], V) when is_map(V) andalso is_map(V1) ->
+    {dirty, maps:merge(V, V1)};
+iterate(_, [], _) ->
     {error, badarg};
-iterate({xl_touch, Key}, [], Container) ->
-    case maps:find(Key, Container) of
-        {ok, Value} ->  % For static data, cache it in Key.
-            {data, Value};
-        error ->
-            error
-    end;
-iterate(xl_touch, [Key], Container) ->
-    case maps:find(Key, Container) of
-        {ok, Value} ->  % For static data, cache it in Key.
-            {data, Value};
-        error ->
-            error
-    end;
-iterate(get, [Key], Container) ->
-    maps:find(Key, Container);
 iterate({put, Value}, [Key], Container) ->
     NewC = maps:put(Key, Value, Container),
     {dirty, NewC};
@@ -718,15 +714,75 @@ iterate(Command, [Key | Path], Container) ->
                     Result
             end;
         error ->
-            {error, badarg}
+            {error, undefined}
     end.
+
+%%%% handle notifications without response.
+-spec appeal(command(), state()) -> result().
+appeal({xl_notify, Info}, #{'_subscribers' := Subs} = State) ->
+    maps:fold(fun(M, P, A) ->
+                      catch P ! {M, Info},
+                      A
+              end, 0, Subs),
+    {ok, State};
+appeal({unsubscribe, Ref}, #{'_subscribers' := Subs} = State) ->
+    demonitor(Ref, [flush]),
+    Subs1 = maps:remove(Ref, Subs),
+    {ok, State#{'_subscribers' := Subs1}};
+%% Failover status of FSM, cache the messages into pending queue.
+%% Notice: if _max_pending_size is 0, do not cache message.
+%% 
+%% appeal(Info, #{'_status' := failover,
+%%                '_max_pending_size' := Size} = Fsm) ->
+appeal(Info, #{'_status' := failover} = Fsm) ->
+    Size = maps:get('_max_pending_size', Fsm, infinity),
+    Q = maps:get('_pending_queue', Fsm, []),
+    Q1 = enqueue(Info, Q, Size),
+    {noreply, Fsm#{'_pending_queue' => Q1}};
+%% Relay all other messages to state process and return explicit noreply.
+appeal(Info, #{'_state' := {link, Pid, _}} = Fsm) ->
+    Pid ! Info,
+    {noreply, Fsm};
+appeal(_Info, State) ->
+    {ok, State}.
+
+%% Untie fatal link or monitor of the attribute reference. Attribute
+%% is removed too. If Stop is true, cast stop message to the
+%% process linked before.
+-spec remove(tag(), state()) -> state().
+remove(Key, State) ->
+    remove(Key, State, true).
+
+-spec remove(tag(), state(), boolean()) -> state().
+remove(Key, #{'_monitors' := M} = State, Stop) ->
+    S = case maps:find(Key, State) of
+            {ok, {link, Pid, Pid}} ->
+                unlink(Pid),
+                M1 = maps:remove(Pid, M),
+                case Stop of
+                    true ->
+                        catch Pid ! {xl_stop, shutdown};
+                    false ->
+                        ok
+                end,
+                State#{'_monitors' := M1};
+            {ok, {link, _, Monitor}} ->
+                demonitor(Monitor, [flush]),
+                M1 = maps:remove(Monitor, M),
+                State#{'_monitors' := M1};
+            {ok, _} ->
+                State;
+            error ->
+                State
+        end,
+    maps:remove(Key, S).
 
 %% --------------------------------------------------------------------
 %% Helper functions for active attribute access.
 %% --------------------------------------------------------------------
 %% Data types of attributes:
 %% {link, pid(), identifier()} |
-%% {ref, path() | process()} | {ref, {path() | process(), tag()}} |
+%% refers(),
 %% {state, {state(), actions()}} | {state, state()} | Value :: term().
 %% when actions() :: state | module() | Module :: binary() | Actions :: map().
 -spec activate(tag(), state()) -> active_return().
@@ -801,11 +857,11 @@ attach(state, Data, Key, State) ->
 attach(data, Data, Key, State) ->
     {data, Data, State#{Key => Data}};
 %% reference type, may cause recurisively request.
-attach(ref, {Path, Id}, Key, State) ->  % external reference.
-    {Code, Result} = scall(Path, {xl_touch, Id}, State),
+attach(refer, {Path, Id}, Key, State) ->  % external reference.
+    {Code, Result} = scall(Path, {touch, Id}, State),
     attach(Code, Result, Key, State);
-attach(ref, Path, Key, State) ->  % internal reference.
-    {Code, Result, S} = relay(Path, xl_touch, State),
+attach(refer, Path, Key, State) ->  % internal reference.
+    {Code, Result, S} = invoke(Path, touch, State),
     attach(Code, Result, Key, S);
 %% Error or volatile data need not cache in attribute Key.
 attach(Type, Data, _Key, State) ->
@@ -826,14 +882,14 @@ attach(Type, Data, _Key, State) ->
 fetch_link(Key, {function, Links}, State) ->
     Links(Key, State);
 %% Links pid type:
-%% send special command 'touch': {xlx, From, {xl_touch, Key}},
+%% send special command 'touch': {xlx, From, {touch, Key}},
 %%   argument: Key :: tag(),
 %%   return: result() without last state() element.
 fetch_link(Key, {link, Links, _}, State) ->
-    {Sign, Result} = scall(Links, {xl_touch, Key}, State),
+    {Sign, Result} = scall(Links, {touch, Key}, State),
     {Sign, Result, State};
 %% Links map type format:
-%% {ref, path()} |
+%% refers() |
 %%   {state, state_d()} |
 %%   {data, term()}.
 %% return: {process, pid(), state()} | {state, state_d(), state()}
@@ -982,7 +1038,7 @@ next_state(Vector, {link, States, _}, Fsm) ->
     %% Internal data structure of States actor is same as States map.
     %% In special case, touch operation may make a cache of #{{From,
     %% To} => state()} in States.
-    case scall(States, {xl_touch, Vector}, Fsm) of
+    case scall(States, {touch, Vector}, Fsm) of
         {data, Data} ->  % Do not accept other types, only data.
             {Data, Fsm};
         _ ->
@@ -1057,6 +1113,10 @@ handle_2({xlx, _From, _, _}, {noreply, State}) ->
 %% 'stop' without reply means response is sent already or later.
 handle_2({xlx, _From, _, _}, {stop, Reason, S}) ->
     {stop, Reason, S};
+%% Reply and enter hibernate
+handle_2({xlx, From, _, _}, {Code, Reply, S, hibernate}) ->
+    reply(From, {Code, Reply}),
+    {noreply, S, hibernate};
 %% Reply special message other than gen_server.  Four elements of
 %% tuple is stop signal. Code is not always 'stop'.
 handle_2({xlx, From, _, _}, {Code, Reason, Reply, S}) ->
@@ -1129,10 +1189,6 @@ default_react({xl_retry, Key, <<"restart">>}, State) ->
 %% Delay recovery for FSM.
 default_react({xl_retry, Recovery}, #{'_status' := failover} = Fsm) ->
     retry(Fsm, Recovery);
-%% Special message: For FSM type actor, when path is ".", call FSM
-%% actor directly.
-default_react({xlx, _From, [<<".">>], Command}, State) ->
-    recall(Command, State);
 %% State transition message. Output :: state() | {term(), vector()}.
 default_react({xl_leave, From, Output}, #{'_state' := _} = Fsm) ->
     catch From ! {ok, xl_leave_ack},
@@ -1144,17 +1200,15 @@ default_react({xl_leave, From, _}, State) ->
 %% FSM type actor relay messages without path to state process.
 default_react({xlx, _From, [], _} = Request,
               #{'_state' := {link, _, _}} = Fsm) ->
-    recast(Request, Fsm);
+    appeal(Request, Fsm);
 default_react({xlx, _, [], _} = Request,
               #{'_status' := failover} = Fsm) ->
-    recast(Request, Fsm);
-default_react({xlx, _From, [], Command}, State) ->
-    recall(Command, State);
+    appeal(Request, Fsm);
 default_react({xlx, From, Path, Command}, State) ->
-    relay(From, Path, Command, State);
+    invoke(From, Path, Command, State);
 %% ------ Messages for actor or FSM ------
 default_react(Info, State) ->
-    recast(Info, State).
+    appeal(Info, State).
 
 handle_halt(Id, Throw, #{'_monitors' := M} = State) ->
     case maps:find(Id, M) of
@@ -1168,13 +1222,13 @@ handle_halt(Id, Throw, #{'_monitors' := M} = State) ->
         %% while. Compare with default recovery, it is reload on next
         %% demand.
         {ok, {Key, <<"restart">>}} ->
-            {ok, done, S} = delete(Key, State),
+            S = remove(Key, State),
             Interval = maps:get('_retry_interval', S, ?RETRY_INTERVAL),
             erlang:send_after(Interval, self(), {xl_retry, Key, <<"restart">>}),
             {ok, S};
         %% Just remove it and wait for next access to trigger recovery.
         {ok, {Key, undefined}} ->
-            {ok, done, S} = delete(Key, State, false),
+            S = remove(Key, State, false),
             {ok, S};
         %% Down message from subscriber or not, remove it.
         error when is_reference(Id) ->
@@ -1186,80 +1240,6 @@ handle_halt(Id, Throw, #{'_monitors' := M} = State) ->
         error ->
             {ok, State}
     end.
-
-%% Retrieve data, activate or peek the attribute, like 'touch' command
-%% in bash shell.
-%% If there is no attribute name, give the state pid.
-recall(xl_touch, State) ->
-    {process, self(), State};
-recall({xl_touch, Key}, State) ->
-    activate(Key, State);
-%% Normal case data fetching.
-recall({get, Key}, State) ->
-    get(Key, State);
-%% Raw data value of attribute.
-recall({get, Key, raw}, State) ->
-    get_raw(Key, State);
-%% All exportable data, exclude internal attributes and active
-%% attributes.
-recall(get, State) ->
-    get_all(State);  % 
-%% Internal attributes names are atom type, cannot be changed
-%% externally.
-recall({put, Key, _}, State) when is_atom(Key) ->
-    {error, forbidden, State};
-recall({put, Key, Value}, State) ->
-    put(Key, Value, State);
-%% Purge data
-recall({delete, Key}, State) when is_atom(Key) ->
-    {error, forbidden, State};
-recall({delete, Key}, State) ->
-    delete(Key, State);
-recall({subscribe, Pid}, State) ->
-    Subs = maps:get('_subscribers', State, #{}),
-    Mref = monitor(process, Pid),
-    Subs1 = Subs#{Mref => Pid},
-    {ok, Mref, State#{'_subscribers' => Subs1}};
-%% Unsubscribe operation may be triggered by request or notification
-%% with different message format: {xlx, From, Path, {unsubscribe,
-%% Ref}} vs {xl_unsubscribe, Ref}.
-recall({unsubscribe, Ref}, State) ->
-    {ok, NewState} = recast({xl_unsubscribe, Ref}, State),
-    {ok, done, NewState};
-%% Interactive stop.
-recall({xl_stop, Reason}, State) ->
-    {ok, Reason, done, State};
-recall(xl_stop, State) ->
-    {ok, normal, done, State};
-recall(_, State) ->
-    {error, unknown, State}.
-
-recast({xl_notify, Info}, #{'_subscribers' := Subs} = State) ->
-    maps:fold(fun(M, P, A) ->
-                      catch P ! {M, Info},
-                      A
-              end, 0, Subs),
-    {ok, State};
-recast({xl_unsubscribe, Ref}, #{'_subscribers' := Subs} = State) ->
-    demonitor(Ref, [flush]),
-    Subs1 = maps:remove(Ref, Subs),
-    {ok, State#{'_subscribers' := Subs1}};
-%% Failover status of FSM, cache the messages into pending queue.
-%% Notice: if _max_pending_size is 0, do not cache message.
-%% 
-%% recast(Info, #{'_status' := failover,
-%%                '_max_pending_size' := Size} = Fsm) ->
-recast(Info, #{'_status' := failover} = Fsm) ->
-    Size = maps:get('_max_pending_size', Fsm, infinity),
-    Q = maps:get('_pending_queue', Fsm, []),
-    Q1 = enqueue(Info, Q, Size),
-    {noreply, Fsm#{'_pending_queue' => Q1}};
-%% Relay all other messages to state process and return explicit noreply.
-recast(Info, #{'_state' := {link, Pid, _}} = Fsm) ->
-    Pid ! Info,
-    {noreply, Fsm};
-recast(_Info, State) ->
-    {ok, State}.
 
 %% --------------------------------------------------------------------
 %% FSM state transition functions.
@@ -1363,7 +1343,7 @@ t3({exception, Fsm}, Output, _) ->
     t2(Fsm, Output, exception);
 t3({Next, Fsm}, Output, Vector) ->
     Step = maps:get('_step', Fsm, 0),
-    {ok, done, F} = delete('_state', Fsm, false),
+    F = remove('_state', Fsm, false),
     {Next, F#{'_step' => Step + 1, '_output' => Output, '_sign' => Vector}}.
 
 %% Absolute sign as vector() type.
