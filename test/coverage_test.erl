@@ -386,7 +386,7 @@ coverage() ->
     {error, undefined} = xl:call(P39, {get, e}),
     {stopped, normal} = xl:stop(P39),
 
-    F40 = fun({get, Key}, S) ->
+    F40 = fun({xlx, _, [], {get, Key}}, S) ->
                   {ok, {f40, Key}, S}
           end,
     S40 = #{2 => a,
