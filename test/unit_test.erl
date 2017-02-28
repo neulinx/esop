@@ -18,10 +18,10 @@
 %% General control.
 %%-------------------------------------------------------------------
 unit_test_() ->
-    error_logger:tty(false),
+%    error_logger:tty(false),
     Test = [%% {"Recovery for FSM", fun test7/0},
             %% {"Recovery for active attribute", fun test6/0},
-            %% {"Simple FSM", fun test5/0},
+            {"Simple FSM", fun test5/0},
             {"Active attribute", fun test4/0},
             {"Data traversal", fun test3/0},
             {"Basic access and subscribe", fun test2/0},
@@ -143,7 +143,7 @@ test_path(Pid) ->
 %%-------------------------------------------------------------------
 test4() ->
     Entry = fun(#{'_parent' := P} = S) ->
-                    {ok, done, S1} = xl:request({put, {process, P}}, reg, S),
+                    {ok, done, S1} = xl:invoke([reg], {put, {process, P}}, S),
                     {ok, S1}
             end,
     A1 = #{name => a1,
@@ -215,15 +215,14 @@ test5() ->
              '_states' => {state, P}},
     test5(Fsm3).
 
-
 test5(Fsm) ->
     {ok, F} = xl:start(Fsm),
-    {ok, t1} = xl:call(F, {get, '_name'}),
-    {ok, fsm} = xl:call([F, <<".">>], {get, '_name'}),
+    {ok, t1} = xl:call([F, '_name'], get),
+    {ok, fsm} = xl:call([F, <<".">>, '_name'], get),
     {ok, done} = xl:call(F, xl_stop),
-    {ok, t2} = xl:call(F, {get, '_name'}),
+    {ok, t2} = xl:call([F, '_name'], get),
     {ok, done} = xl:call(F, xl_stop),
-    {ok, t3} = xl:call(F, {get, '_name'}),
+    {ok, t3} = xl:call([F, '_name'], get),
     {ok, Ref} = xl:subscribe(F),
     {ok, done} = xl:call(F, xl_stop),
     {Ref, {exit, #{'_output' := 3}}} = receive
