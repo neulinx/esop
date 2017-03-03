@@ -23,7 +23,7 @@
 -export([start/1, start/2, start/3]).
 -export([stop/1, stop/2, stop/3]).
 -export([call/2, call/3, call/4, cast/2, cast/3, reply/2, notify/2]).
--export([invoke/2, invoke/3, invoke/4, appeal/2]).
+-export([request/3, invoke/2, invoke/4]).
 -export([activate/2, attach/4, remove/2, remove/3]).
 
 %% -------------------------------------------------------------------
@@ -135,7 +135,7 @@
              '_aftermath' => binary(),
              '_recovery' => recovery(),
              '_link_recovery' => binary(),  % default is <<"restart">>.
-             '_name' => tag(),
+             '_id' => tag(),
              '_start' => map(),  % #{<<"input">>, <<"sign">>},
              '_max_steps' => limit(),
              '_preload' => list(),
@@ -157,7 +157,7 @@
 
 %%%% Identifiers.
 -type process() :: pid() | (LocalName :: atom()).
--type tag() :: atom() | string() | binary() | integer().
+-type tag() :: atom() | string() | binary() | integer() | tuple().
 -type path() :: [process() | tag()].
 -type target() :: process() | path().
 -type from() :: {To :: process(), Tag :: identifier()} | 'undefined'.
@@ -169,7 +169,7 @@
                   {Vetex :: tag(), Edge :: tag()}.
 %% In state, '_sign' may be relative as tag() type or absolute as
 %% vector() type.
--type sign() :: vector() | tag().
+-type sign() :: vector() | tag().  % tag() same as {tag()}.
 -type monitor() :: {tag(), recovery()}.
 
 %%%% attributes
@@ -185,7 +185,7 @@
 %% Reference of another actor's attribute.
 -type refer() :: {'refer', path() | {target(), tag()}}.
 -type redirect() :: {'redirect', target()}.
--type skip() :: {'redirect', 'undefined'}.
+-type skip() :: {'redirect', []}.
 -type refers() :: refer() | redirect() | skip().
 -type monitors() :: #{identifier() => monitor()}.
 %% If vector() was list, links_map contains string type of attribute
@@ -252,7 +252,8 @@
 %% - hibernate command: xl_hibernate
 %% - stop command: xl_stop | {xl_stop, reason()}
 %% - state enter event: xl_enter.
-%% - state transition event: {xl_leave, Pid, state() | {Output, vector()}},
+%% - state transition event: {xl_leave, Pid, state() | {Output, vector()}}
+%% - messages in the gap between states: {xl_intransition, Message}
 %%   ACK: {ok, xl_leave_ack} reply to from Pid.
 %% - post data package for trace log:
 %%           {xl_trace, {log, Trace} | {backtrack, Back}}
@@ -305,7 +306,8 @@
 %% - exception: generic error.
 %% - stop: machine stop and process exit.
 %% - halt: machine stop but process is still alive.
-%% - abort: FSM is not finished, exit by exception or command.
+%% - escape: FSM is not finished, but current state is finished.
+%% - abort: FSM is not finished, current state is terminated by command.
 %% --------------------------------------------------------------------
 -type command() :: 'touch' | 'get' | 'get_raw' | 'delete' |
                    {'put', term()} | {'patch', term()} |
@@ -348,11 +350,25 @@ handle_cast(Message, State) ->
                          {'noreply', state()} |
                          {'stop', reason(), state()}.
 handle_info(Message, State) ->
-    Info = normalize_msg(Message),
-    Res = handle(Info, State),
-    Res1 = handle_1(Info, Res),
-    Res2 = handle_2(Info, Res1),
-    handle_3(Res2).
+    case pre_handle(Message) of
+        {xlx, From, _, _} = Info ->
+            Source = From;
+        Info ->
+            Source = noreply
+    end,
+    Result = case handle(Info, State) of
+                 {ok, unhandled, State1} ->
+%%%%%%%%%% Defend here? or trust the defence line of gen_server?
+                     default_react(Info, State1);
+                 Res0 ->
+                     Res0
+             end,
+    case post_handle(Result, Source) of
+        {noreply, #{'_hibernate' := Timeout} = State2} ->
+            {noreply, State2, Timeout};
+        Res2 ->
+            Res2
+    end.
 
 %% This function is called by a gen_server when it is about to
 %% terminate. It should be the opposite of Module:init/1 and do any
@@ -480,7 +496,7 @@ create(Module, Data) when is_list(Data) ->
 reply({To, Tag}, Reply) ->
     catch To ! {Tag, Reply},
     ok;
-reply(undefined, _) ->
+reply(_, _) ->
     ok.
 
 %% Same as gen_server:call().
@@ -521,7 +537,7 @@ cast(Process, Command) ->
 
 -spec cast(process(), path(), Message :: term()) -> 'ok'.
 cast(Process, Path, Message) ->
-    catch Process ! {xlx, undefined, Path, Message},
+    catch Process ! {xlx, noreply, Path, Message},
     ok.
 
 %% stop is almost same effect as gen_server:stop().
@@ -571,7 +587,7 @@ notify(Process, Info) ->
 %% Hierarchical data in a state data map can only support
 %% touch/get/put/delete operations.
 %%
-%% invoke/3 is sync operation that wait for expected reply. Instant
+%% request/3 is sync operation that wait for expected reply. Instant
 %% return version is invoke/4 with first parameter 'undefined':
 %% 
 %% invoke(undefined, Path, Notification, State).
@@ -614,9 +630,16 @@ invoke({subscribe, Pid}, State) ->
 %% Unsubscribe operation may be triggered by request or notification
 %% with different message format: {xlx, From, Path, {unsubscribe,
 %% Ref}} vs {unsubscribe, Ref}.
-invoke({unsubscribe, Ref}, State) ->
-    {ok, NewState} = appeal({unsubscribe, Ref}, State),
-    {ok, done, NewState};
+invoke({xl_notify, Info}, #{'_subscribers' := Subs} = State) ->
+    maps:fold(fun(M, P, A) ->
+                      catch P ! {M, Info},
+                      A
+              end, 0, Subs),
+    {ok, done, State};
+invoke({unsubscribe, Ref}, #{'_subscribers' := Subs} = State) ->
+    demonitor(Ref, [flush]),
+    Subs1 = maps:remove(Ref, Subs),
+    {ok, done, State#{'_subscribers' := Subs1}};
 %% Interactive stop.
 invoke({xl_stop, Reason}, State) ->
     {ok, Reason, done, State};
@@ -628,11 +651,10 @@ invoke(_, State) ->
     {error, unknown, State}.
 
 %% Synchoronous version of request, wait for response till timeout.
--spec invoke(target(), Command :: term(), state()) -> result().
-invoke(Path, Command, State) ->
-    Tag = make_ref(),
-    case invoke({self(), Tag}, Path, Command, State) of
-        {ok, S} ->
+-spec request(target(), Command :: term(), state()) -> result().
+request(Path, Command, State) ->
+    case invoke(undefined, Path, Command, State) of
+        {'_pending', Tag, S} ->
             Timeout = maps:get('_timeout', S, ?DFL_TIMEOUT),
             receive
                 {Tag, {Code, Result}} ->
@@ -649,8 +671,6 @@ invoke(Path, Command, State) ->
 -spec invoke(from(), target(), Command :: term(), state()) -> result().
 invoke(_, [], Command, State) ->
     invoke(Command, State);
-invoke(_, [<<".">>], Command, State) ->
-    invoke(Command, State);
 invoke(_, [Key], touch, State) ->
     activate(Key, State);
 invoke(_, [Key], get_raw, State) ->
@@ -666,11 +686,19 @@ invoke(_, [Key], {put, Value}, State) ->
 invoke(_, [Key], delete, State) ->
     S = remove(Key, State, true),
     {ok, done, S};
+%% Sugar for '_state' access.
+invoke(From, [<<>> | Path], Command, State) ->
+    invoke(From, ['_state' | Path], Command, State);
 invoke(From, [Key | Path], Command, State) ->
     case activate(Key, State) of
+        {process, Pid, S} when From =:= undefined ->
+            Tag = make_ref(),
+            Pid ! {xlx, {self(), Tag}, Path, Command},
+            {'_pending', Tag, S};
         {process, Pid, S} ->  % relay request to the linked actor.
             Pid ! {xlx, From, Path, Command},
-            {ok, S};
+            {noreply, S};
+        %% Func should checkeck From value as above cases of process.
         {function, Func, S} ->  % relay request to message handler.
             Func({xlx, From, Path, Command}, S);
         {data, Package, S} ->  % traverse local forest.
@@ -682,12 +710,10 @@ invoke(From, [Key | Path], Command, State) ->
             end;
         Error ->
             Error
-    end;
-%% This is a backdoor for request without connection.
-invoke(From, Process, Command, State) ->  % pid or registered name.
-    Process ! {xlx, From, [], Command},
-    {ok, State}.
+    end.
 
+iterate(touch, [], {Type, Data}) ->
+    {Type, Data};
 iterate(touch, [], Data) ->
     {data, Data};
 iterate(get, [], Data) ->
@@ -716,35 +742,6 @@ iterate(Command, [Key | Path], Container) ->
         error ->
             {error, undefined}
     end.
-
-%%%% handle notifications without response.
--spec appeal(command(), state()) -> result().
-appeal({xl_notify, Info}, #{'_subscribers' := Subs} = State) ->
-    maps:fold(fun(M, P, A) ->
-                      catch P ! {M, Info},
-                      A
-              end, 0, Subs),
-    {ok, State};
-appeal({unsubscribe, Ref}, #{'_subscribers' := Subs} = State) ->
-    demonitor(Ref, [flush]),
-    Subs1 = maps:remove(Ref, Subs),
-    {ok, State#{'_subscribers' := Subs1}};
-%% Failover status of FSM, cache the messages into pending queue.
-%% Notice: if _max_pending_size is 0, do not cache message.
-%% 
-%% appeal(Info, #{'_status' := failover,
-%%                '_max_pending_size' := Size} = Fsm) ->
-appeal(Info, #{'_status' := failover} = Fsm) ->
-    Size = maps:get('_max_pending_size', Fsm, infinity),
-    Q = maps:get('_pending_queue', Fsm, []),
-    Q1 = enqueue(Info, Q, Size),
-    {noreply, Fsm#{'_pending_queue' => Q1}};
-%% Relay all other messages to state process and return explicit noreply.
-appeal(Info, #{'_state' := {link, Pid, _}} = Fsm) ->
-    Pid ! Info,
-    {noreply, Fsm};
-appeal(_Info, State) ->
-    {ok, State}.
 
 %% Untie fatal link or monitor of the attribute reference. Attribute
 %% is removed too. If Stop is true, cast stop message to the
@@ -778,8 +775,12 @@ remove(Key, #{'_monitors' := M} = State, Stop) ->
     maps:remove(Key, S).
 
 %% --------------------------------------------------------------------
-%% Helper functions for active attribute access.
-%% --------------------------------------------------------------------
+%% States is map or active attribute to keep state data, which is not
+%% only for FSMs but also for links. For FSMs, key of the state map
+%% must be tuple type, which is form of {Vertex, Edge} as a vector of
+%% graph. To simplify states arrangement, single element Vector:{Edge}
+%% is global vector can match any Vertex.
+%%
 %% Data types of attributes:
 %% {link, pid(), identifier()} |
 %% refers(),
@@ -796,8 +797,14 @@ activate(Key, State) ->
             attach(Type, Data, Key, State);
         {ok, Value} ->
             {data, Value, State};
-        error ->  % not found, try to activate data in '_states'.
-            attach(Key, State)
+        error when Key =:= '_states' ->
+            {error, undefined, State};
+        error ->
+            %% Try to retrieve data or external actor, and attach to
+            %% attribute of current actor. Cache data if states retrun
+            %% {data, Data, State}.
+            {Type, Data, State1} = request(['_states', Key], touch, State),
+            attach(Type, Data, Key, State1)
     end.
 
 %% Intermediate function to bind behaviors with state.
@@ -828,14 +835,6 @@ activate_(Key, Value, #{'_monitors' := M} = State) ->
     Monitors = M#{Pid => {Key, Recovery}},
     {process, Pid, State#{Key => {link, Pid, Pid}, '_monitors' := Monitors}}.
 
-%% Try to retrieve data or external actor, and attach to attribute of
-%% current actor. Cache data if fetch_link retrun {data, Data, State}.
-attach(Key, #{'_states' := Links} = State) ->
-    {Type, Data, State1} = fetch_link(Key, Links, State),
-    attach(Type, Data, Key, State1);
-attach(_, State) ->
-    {error, undefined, State}.
-
 -spec attach(tag(), Data :: term(), Key :: term(), state()) -> active_return().
 %% attach function to an active attribute.
 attach(function, Func, Key, State) ->
@@ -861,49 +860,11 @@ attach(refer, {Path, Id}, Key, State) ->  % external reference.
     {Code, Result} = scall(Path, {touch, Id}, State),
     attach(Code, Result, Key, State);
 attach(refer, Path, Key, State) ->  % internal reference.
-    {Code, Result, S} = invoke(Path, touch, State),
+    {Code, Result, S} = request(Path, touch, State),
     attach(Code, Result, Key, S);
 %% Error or volatile data need not cache in attribute Key.
 attach(Type, Data, _Key, State) ->
     {Type, Data, State}.
-
-%% -type result() :: {process, pid(), state()} |
-%%   {function, Func, state()} |
-%%   {state, state_d(), state()} |
-%%   {data, term(), state()} |
-%%   {Code, Data, state()} |
-%%   {error, term(), state()}.
-%%   
-%% If fetch link returned static data as {data, Data, State}, the Data
-%% may be cached in related attribute.
-%% 
-%% Links function type: -spec link_fun(tag(),
-%% state()) -> result().
-fetch_link(Key, {function, Links}, State) ->
-    Links(Key, State);
-%% Links pid type:
-%% send special command 'touch': {xlx, From, {touch, Key}},
-%%   argument: Key :: tag(),
-%%   return: result() without last state() element.
-fetch_link(Key, {link, Links, _}, State) ->
-    {Sign, Result} = scall(Links, {touch, Key}, State),
-    {Sign, Result, State};
-%% Links map type format:
-%% refers() |
-%%   {state, state_d()} |
-%%   {data, term()}.
-%% return: {process, pid(), state()} | {state, state_d(), state()}
-%%     | {data, term(), state()} | {error, term(), state()}.
-fetch_link(Key, Links, State) ->
-    case maps:find(Key, Links) of
-        error ->
-            {error, undefined, State};
-        %% Type: state, process, function, data, reference.
-        {ok, {Type, Data}} ->
-            {Type, Data, State};
-        {ok, Data} ->  % Default behavior is cache data in attribute.
-            {data, Data, State}
-    end.
 
 %% --------------------------------------------------------------------
 %% gen_server callbacks. Initializes the server with state action
@@ -945,10 +906,8 @@ prepare({ok, State}, true) ->
     {_, _, S1} = activate('_traces', S),
     %% load dependent links.
     S2 = preload(S1),
-    %% load introducer of FSM.
-    {_, _, S3} = activate('_state', S2),
     %% try to initialize FSM if it is.
-    prepare(init_fsm(S3), false);
+    prepare(init_fsm(S2), false);
 prepare({ok, State, Option}, true) ->
     case prepare({ok, State}, true) of
         {ok, NewState} ->
@@ -988,74 +947,34 @@ preload(State) ->
 %% --------------------------------------------------------------------
 %% Initialize and launch FSM.
 %% 
-%% Flag of FSM is existence of the attribute named _state.  Specially,
-%% '_states' data should be initialized by loader.  Initialization
-%% operation is for data load from persistent store.  External links
-%% can be used as state processes, but it is not recommended to do
-%% so. But intializer of the FSM may pre-spawn a process as
-%% starter. Here is a simple initializing routine for raw data of
-%% '_start'. Assert '_start' is map of #{<<"input">> := Input,
-%% <<"sign">> := Sign}, where Sign must be present and be list format.
-%% Note that the raw data does not support the tuple type. Raw data
-%% vector in list type may convert to tuple type at first.
+%% Flag of FSM is existence of the attribute named _state. _state may
+%% be pre-spawned external process as an introducer, function share
+%% same process with the fsm actor, or data map with '_sign' '_output'
+%% '_recovery' keys. '_output' key name is compatible with transfer
+%% function, actually means input of next state.
 %% --------------------------------------------------------------------
-%% Pre-spawned state as an introducer.
-init_fsm(#{'_state' := {link, _, _}} = Fsm) ->
-    {ok, Fsm};
-%% Initialized by another routine. InitializedState is form of map()
-%% or {Input, Sign} that is compatible with the second paramenter of
-%% fun transfer/2.
-init_fsm(#{'_state' := InitializedState} = Fsm) ->
-    transfer(Fsm, InitializedState);
-%% Be not initialized, accept only two parameters of '_start' map.
-init_fsm(#{'_start' := Map} = Fsm) ->
-    Input = maps:get(<<"input">>, Map, undefined),
-    Sign = maps:get(<<"sign">>, Map),
-    Next = {Input, list_to_tuple(Sign)},
-    init_fsm(Fsm#{'_state' => Next});
-%% It is not FSM.
-init_fsm(State) ->
-    {ok, State}.
-
-%% --------------------------------------------------------------------
-%% States is map or active attribute to keep state data, which is not
-%% only for FSMs but also for links. For FSMs, key of the state map
-%% must be tuple type, which is form of {Vertex, Edge} as a vector of
-%% graph. To simplify states arrangement, single element Vector:{Edge}
-%% is global vector can match any Vertex.
-%%
-%% There are rules for states set:
-%% - Sign must not be tuple type.
-%% - If {FromState, ToSign} is not found, then try {ToSign}.
-%% - If it is not found at last, throw excepion rather than return error.
-%% --------------------------------------------------------------------
-next_state(Vector, States, Fsm) when not is_tuple(Vector) ->
-    next_state({Vector}, States, Fsm);
-next_state(Vector, {function, States}, Fsm) ->
-    {data, State, Fsm1} = States(Vector, Fsm),
-    {State, Fsm1};
-next_state(Vector, {link, States, _}, Fsm) ->
-    %% Internal data structure of States actor is same as States map.
-    %% In special case, touch operation may make a cache of #{{From,
-    %% To} => state()} in States.
-    case scall(States, {touch, Vector}, Fsm) of
-        {data, Data} ->  % Do not accept other types, only data.
-            {Data, Fsm};
-        _ ->
-            error({get_state, badarg})
-    end;
-next_state(Vector, States, Fsm) ->
-    {locate(Vector, States), Fsm}.
-
-%% As a vector, Vector parameter may contain many dimensions, 1, 2 or
-%% larger than 2. Current version only support 2 dimensions.
-locate(Vector, States) ->
-    case maps:find(Vector, States) of
-        {ok, State} ->
-            State;
-        error ->
-            {_, Global} = Vector,  % Fall through to global.
-            locate({Global}, States)
+init_fsm(Fsm) ->
+    %% undefined _recovery of start state use '_recovery'
+    %% of the FSM as default.
+    %%
+    %% Request _input value means may be active attribute. Activate
+    %% and get value. If error occured, Input should be undefined.
+    {_, Input, Fsm1} = request(['_input'], get, Fsm),
+    case activate('_state', Fsm1) of
+        {data, #{'_output' := _} = Start, Fsm2} ->
+            transfer(Fsm2, Start);  % start state has it own input.
+        {data, Start, Fsm2} when is_map(Start) ->
+            transfer(Fsm2, Start#{'_output' => Input});
+        {data, Start, Fsm2} ->
+            transfer(Fsm2, #{'_sign' => Start, '_output' => Input});
+        %% {process, _, F} ->  % pre-spawn process as start state
+        %%     {ok, F};
+        %% {function, _, F} -> % function as start state, may share process.
+        %%     {ok, F};
+        %% {error, undefined, F} ->  % no '_state' present.
+        %%     {ok, F};
+        {_, _, F} ->
+            {ok, F}
     end.
 
 %% --------------------------------------------------------------------
@@ -1063,15 +982,15 @@ locate(Vector, States) ->
 %% procedure. 
 %% --------------------------------------------------------------------
 %% Empty path, the last hop.
-normalize_msg({xlx, From, Command}) ->
+pre_handle({xlx, From, Command}) ->
     {xlx, From, [], Command};
 %% Sugar for stop.
-normalize_msg(xl_stop) ->
+pre_handle(xl_stop) ->
     {xl_stop, normal};
 %% gen_server timeout as hibernate command.
-normalize_msg(timeout) ->
+pre_handle(timeout) ->
     xl_hibernate;
-normalize_msg(Msg) ->
+pre_handle(Msg) ->
     Msg.
 
 %% Notice: if there is no '_react' action or '_react' action do not
@@ -1089,63 +1008,33 @@ handle(Info, #{'_react' := React} = State) ->
 handle(_Info, State) ->
     {ok, unhandled, State}.
 
-%% Process unhandled message by default handlers.
-handle_1(Info, {ok, unhandled, State}) ->
-    default_react(Info, State);
-handle_1(_Info, Res) ->
-    Res.
-
-%% Stop or hibernate may be canceled by state react with code error.
-handle_2({xl_stop, Reason}, {ok, State}) ->
-    {stop, Reason, State};
-%% Cut off the reply because of no receiver.
-handle_2({xl_stop, Reason}, {ok, _, State}) ->
-    {stop, Reason, State};
-%% Hibernate command, not guarantee.
-handle_2(xl_hibernate, {ok, State}) ->
-    {noreply, State, hibernate};
-handle_2(xl_hibernate, {ok, _, State}) ->
-    {noreply, State, hibernate};
-%% Reply is not here when code is noreply or stop. 'noreply' is
-%% explicit code for later response.
-handle_2({xlx, _From, _, _}, {noreply, State}) ->
-    {noreply, State};
-%% 'stop' without reply means response is sent already or later.
-handle_2({xlx, _From, _, _}, {stop, Reason, S}) ->
-    {stop, Reason, S};
-%% Reply and enter hibernate
-handle_2({xlx, From, _, _}, {Code, Reply, S, hibernate}) ->
-    reply(From, {Code, Reply}),
-    {noreply, S, hibernate};
-%% Reply special message other than gen_server.  Four elements of
-%% tuple is stop signal. Code is not always 'stop'.
-handle_2({xlx, From, _, _}, {Code, Reason, Reply, S}) ->
-    reply(From, {Code, Reply}),
-    {stop, Reason, S};
-%% Generic reply.
-handle_2({xlx, From, _, _}, {Code, Reply, S}) ->
-    reply(From, {Code, Reply}),
-    {noreply, S};
 %% Sugar for stop result.
-handle_2(_, {stop, S}) ->
+post_handle({stop, S}, _) ->
     Reason = maps:get('_reason', S, normal),
     {stop, Reason, S};
-handle_2(_, {stop, _, _} = Stop) ->
+post_handle({_, S}, _) ->
+    {noreply, S};
+post_handle({stop, _, _} = Stop, _) ->
     Stop;
-%% Message is handled by '_react' or default handler.
-handle_2(_, {_, S}) ->
+post_handle({_, S, hibernate}, _) ->
+    {noreply, S, hibernate};
+post_handle({reply, Reply, S}, Source) ->
+    reply(Source, Reply),
     {noreply, S};
-handle_2(_, {_, _, S}) ->
+post_handle({_, _, S}, noreply) ->
     {noreply, S};
-%% Assert it is stop result, even if it is not.
-handle_2(_, Stop) ->  % {stop, _, _, _}
-    Stop.
-
-%% Only for OTP hibernate.
-handle_3({noreply, #{'_hibernate' := Timeout} = S}) ->
-    {noreply, S, Timeout};  % add hibernate support.
-handle_3(Result) ->
-    Result.
+post_handle({Code, Result, S}, Source) ->
+    reply(Source, {Code, Result}),
+    {noreply, S};
+post_handle({stop, Reason, Reply, S}, Source) ->
+    reply(Source, Reply),
+    {stop, Reason, S};
+post_handle({Code, Result, S, hibernate}, Source) ->
+    reply(Source, {Code, Result}),
+    {noreply, S, hibernate};
+post_handle({Code, Stop, Result, S}, Source) ->
+    reply(Source, {Code, Result}),
+    {stop, Stop, S}.
 
 %% --------------------------------------------------------------------
 %% Default handlers for messages are 'unhandled'
@@ -1159,13 +1048,10 @@ handle_3(Result) ->
 %%   may be relayed when FSM be recovered.
 %% --------------------------------------------------------------------
 %% Do not spread xl_enter and xl_wakeup messages to children.
-default_react(xl_enter, State) ->
-    {noreply, State};
-default_react(xl_wakeup, State) ->
-    {noreply, State};
-%% 'stop' message is high priority.
-default_react({xl_stop, Reason}, State) ->
-    {stop, Reason, State};
+%% default_react(xl_enter, State) ->
+%%     {noreply, State};
+%% default_react(xl_wakeup, State) ->
+%%     {noreply, State};
 %% External links of active attributes and subscribers are all
 %% processes monitored by the actor. All of them may raise 'DOWN'
 %% events at ending.
@@ -1194,42 +1080,47 @@ default_react({xl_leave, From, Output}, #{'_state' := _} = Fsm) ->
     catch From ! {ok, xl_leave_ack},
     transfer(Fsm, Output);
 %% Drop transition message if this actor is not FSM.
-default_react({xl_leave, From, _}, State) ->
+default_react({xl_leave, From, _}, State) when is_pid(From) ->
     catch From ! {ok, xl_leave_ack},
     {noreply, State};
-%% FSM type actor relay messages without path to state process.
-default_react({xlx, _From, [], _} = Request,
-              #{'_state' := {link, _, _}} = Fsm) ->
-    appeal(Request, Fsm);
-default_react({xlx, _, [], _} = Request,
-              #{'_status' := failover} = Fsm) ->
-    appeal(Request, Fsm);
+%% Failover status of FSM, cache the messages into pending queue.
+%% Notice: if _max_pending_size is not present, do not cache message.
+default_react({xl_intransition, Message}, State) ->
+    enqueue_message(Message, State);
+default_react({xlx, From, ['_state' | Path], Command}, 
+              #{'_status' := failover} = State) ->
+    enqueue_message({xlx, From, Path, Command}, State);
+%% ------ handle request ------
 default_react({xlx, From, Path, Command}, State) ->
     invoke(From, Path, Command, State);
-%% ------ Messages for actor or FSM ------
 default_react(Info, State) ->
-    appeal(Info, State).
+    invoke(Info, State).
+
+enqueue_message(Message, #{'_state' := {link, Pid, _}} = State) ->
+    Pid ! Message,
+    {noreply, State};
+enqueue_message(Message, State) ->
+    Size = maps:get('_max_pending_size', State, infinity),
+    Q = maps:get('_pending_queue', State, []),
+    Q1 = enqueue(Message, Q, Size),
+    {noreply, State#{'_pending_queue' => Q1}}.
 
 handle_halt(Id, Throw, #{'_monitors' := M} = State) ->
     case maps:find(Id, M) of
         %% Self-heal for FSM.
         {ok, {'_state', Recovery}} ->
-            %% Throw is output, excepption is sign. If there is a
+            %% Throw is output, exception is sign. If there is a
             %% state for {exception} in '_states', 'Recovery' will be
             %% ignored.
-            transfer(State, {Throw, {exception}}, Recovery);
-        %% Self-heal for active attribute, it is just reload at a
-        %% while. Compare with default recovery, it is reload on next
-        %% demand.
-        {ok, {Key, <<"restart">>}} ->
-            S = remove(Key, State),
-            Interval = maps:get('_retry_interval', S, ?RETRY_INTERVAL),
-            erlang:send_after(Interval, self(), {xl_retry, Key, <<"restart">>}),
-            {ok, S};
-        %% Just remove it and wait for next access to trigger recovery.
+            FailState = #{'_sign' => {exception},
+                          '_recovery' => Recovery,
+                          '_output' => Throw},
+            transfer(State, FailState);
         {ok, {Key, undefined}} ->
-            S = remove(Key, State, false),
-            {ok, S};
+            Recovery = maps:get('_recovery', State, undefined),
+            aa_recover(Key, Recovery, State);
+        {ok, {Key, Recovery}} ->
+            aa_recover(Key, Recovery, State);
         %% Down message from subscriber or not, remove it.
         error when is_reference(Id) ->
             Subs = maps:get('_subscribers', State),
@@ -1241,6 +1132,19 @@ handle_halt(Id, Throw, #{'_monitors' := M} = State) ->
             {ok, State}
     end.
 
+%% Self-heal for active attribute, it is just reload at a
+%% while. Compare with default recovery, it is reload on next
+%% demand.
+aa_recover(Key, <<"restart">>, State) ->
+    S = remove(Key, State),
+    Interval = maps:get('_retry_interval', S, ?RETRY_INTERVAL),
+    erlang:send_after(Interval, self(), {xl_retry, Key, <<"restart">>}),
+    {ok, S};
+aa_recover(Key, _, State) ->
+    %% Just remove it and wait for next access to trigger recovery.
+    S = remove(Key, State, false),
+    {ok, S}.
+
 %% --------------------------------------------------------------------
 %% FSM state transition functions.
 %%
@@ -1250,16 +1154,17 @@ handle_halt(Id, Throw, #{'_monitors' := M} = State) ->
 %% maybe {{'EXIT', Pid, Reason}, {exception}}. If state process would
 %% not output all state data, it may select and customize the state
 %% data map output.
-transfer(Fsm, #{'_recovery' := Recovery} = Output) ->
-    transfer(Fsm, Output, Recovery);
-transfer(Fsm, Output) ->
-    transfer(Fsm, Output, undefined).
+transfer(Fsm, Indication) ->
+    notify(self(), {transition, Indication}),
+    {_, _, Fsm1} = archive(Fsm, Indication),
+    Recovery = maps:get('_recovery', Indication, undefined),
+    Output = maps:get('_output', Indication, undefined),
+    Vector = make_vector(Indication),
+    transfer(Fsm1, Vector, Output, Recovery).
 
 %% To support different recovery option for each state.
-transfer(Fsm, Output, Recovery) ->
-    notify(self(), {transition, Output}),
-    {_, _, F1} = archive(Fsm, Output),
-    case t1(F1, Output) of
+transfer(Fsm, Vector, Output, Recovery) ->
+    case t1(Fsm, Vector, Output) of
         %% Halt the FSM but keep actor running for data access.
         {stop, #{'_aftermath' := <<"halt">>} = F2} ->
             {ok, F2#{'_status' := halt}};
@@ -1297,62 +1202,58 @@ transfer(Fsm, Output, Recovery) ->
 %% steps is exceede, the full transition message is treated as output
 %% includes sign in it. So healer may create new process with the
 %% output as start state.
-t1(#{'_step' := Step, '_max_steps' := MaxSteps} = Fsm, Output)
+t1(#{'_step' := Step, '_max_steps' := MaxSteps} = Fsm, _, Output)
   when Step >= MaxSteps ->
-    t2(Fsm, Output, exceed_max_steps);
-%% Exception: output is tuple type, in case of being simple or crashed.
-t1(Fsm, {Vector}) ->
-    t2(Fsm, undefined, Vector);
-t1(Fsm, {Output, Vector}) ->
-    t2(Fsm, Output, Vector);
-%% Normal: output is state map type. Must-have attribute '_sign' of state is
-%% directive for next state to transfer
-t1(Fsm, State) ->
-    Output = maps:get('_output', State, undefined),
-    Vector = make_vector(State),
-    t2(Fsm, Output, Vector).
+    t2(Fsm, exceed_max_steps, Output);
+t1(Fsm, Vector, Output) ->
+    t2(Fsm, Vector, Output).
 
 %% Sign of 'exception' should be final state without next hop. But for
 %% feature of customized exception handler, FSM may provide next state
 %% for exception, which must be the final state.
-t2(#{'_states' := States} = Fsm, Output, Vector) ->
-    To = extract_sign(Vector),
-    %% You can provide your own exception and stop state.
-    Next = try
-               next_state(Vector, States, Fsm)
-           catch
-               error: _BadKey when To =:= exception ->
-                   {recover, Fsm};
-               error: _BadKey when To =:= halt ->
-                   {halt, Fsm};
-               error: _BadKey when To =:= stop ->
-                   {stop, Fsm};
-               error: _BadKey when To =:= exceed_max_steps ->
-                   {stop, Fsm};
-               %% Be noted that steps of the exception state is not checked.
-               error: _BadKey ->
-                   {exception, Fsm}
-           end,
-    t3(Next, Output, Vector);
-t2(Fsm, Output, Vector) ->
-    t3({stop, Fsm}, Output, Vector).
+t2(Fsm, Vector, Output) ->
+    %% Prepare for transition. Remove runtime '_state', increase step
+    %% counter, add output and sign attributes.
+    case next_state(Vector, Fsm) of
+        {exception, Fsm1} ->
+            %% You can provide your own exception and stop state.
+            t2(Fsm1, {exception}, Output);
+        {Next, Fsm1} ->            
+            Step = maps:get('_step', Fsm1, 0),
+            F = remove('_state', Fsm1, false),
+            {Next, F#{'_step' => Step + 1,
+                      '_output' => Output,
+                      '_sign' => Vector}}
+    end.
 
-%% Prepare for transition. Remove runtime '_state', increase step
-%% counter, add output and sign attributes.
-t3({exception, Fsm}, Output, _) ->
-    t2(Fsm, Output, exception);
-t3({Next, Fsm}, Output, Vector) ->
-    Step = maps:get('_step', Fsm, 0),
-    F = remove('_state', Fsm, false),
-    {Next, F#{'_step' => Step + 1, '_output' => Output, '_sign' => Vector}}.
+next_state(Vector, Fsm) ->
+    %% Currently, accept only data of map type as state.
+    case request(['_states', Vector], touch, Fsm) of
+        {data, State, F} when is_map(State) ->
+            {State, F};
+        {_, _, F} ->  % undefined or badarg.
+            case default_sign(Vector) of
+                exception ->
+                    {recover, F};
+                halt ->
+                    {halt, F};
+                stop ->
+                    {stop, F};
+                exceed_max_steps ->
+                    {stop, F};
+                _ ->
+                    {exception, F}
+            end
+    end.
+    
 
 %% Absolute sign as vector() type.
 make_vector(#{'_sign' := Sign}) when is_tuple(Sign) ->
     Sign;
-%% Relative sign with name.
-make_vector(#{'_sign' := Sign, '_name' := Name}) ->
-    {Name, Sign};
-%% Relative sign without name, treated as global sign.
+%% Relative sign with ID.
+make_vector(#{'_sign' := Sign, '_id' := Id}) ->
+    {Id, Sign};
+%% Relative sign without ID, treated as global sign.
 make_vector(#{'_sign' := Sign}) ->
     {Sign};
 %% Stop is default sign if it is not present.
@@ -1360,11 +1261,11 @@ make_vector(_) ->
     {stop}.
 
 %% Extract sign of transition from vector.
-extract_sign({Sign}) ->
+default_sign({Sign}) ->
     Sign;
-extract_sign({_, Sign}) ->
+default_sign({_, Sign}) ->
     Sign;
-extract_sign(Sign) ->
+default_sign(Sign) ->
     Sign.
 
 %% --------------------------------------------------------------------
@@ -1376,12 +1277,12 @@ extract_sign(Sign) ->
 recover(#{'_retry_count' := Count, '_max_retry' := Max} = Fsm, _)
   when Count >= Max ->
     {stop, {shutdown, too_many_retry}, Fsm#{'_status' := exception}};
-%% Attention: if value of '_recovery' is undefined, here is an
-%% infinite loop!
+recover(#{'_recovery' := undefined} = Fsm, undefined) ->
+    {stop, {shutdown, exception}, Fsm#{'_status' := exception}};
 recover(#{'_recovery' := Recovery} = Fsm, undefined) ->
     recover(Fsm, Recovery);
 recover(Fsm, undefined) ->
-    {stop, {shutdown, incurable}, Fsm#{'_status' := exception}};
+    {stop, {shutdown, exception}, Fsm#{'_status' := exception}};
 %% To slow down the failover progress, retry operation always
 %% triggered by message. Even the "_retry_interval" is 0, retry
 %% operation is still asynchronous.
@@ -1405,7 +1306,8 @@ retry(Fsm, Rollback) when Rollback < 0 ->
     transfer(Fsm1, Trace);
 %% For recovery, 'Vector' should be absolute sign, which is tuple type.
 retry(#{'_output' := Output} = Fsm, Vector) ->
-    transfer(Fsm, {Output, Vector}).
+    Bypass = #{'_output' => Output, '_sign' => Vector},
+    transfer(Fsm, Bypass).
 
 %% If '_traces' is not present, archive do nothing. So trace log is
 %% disable default, but '_max_traces' default value is
@@ -1435,10 +1337,6 @@ backtrack(Back, #{'_traces' := Traces} = Fsm)  ->
 
 rollback([]) ->
     {error, incurable};
-rollback([{_, exception} | Rest]) ->
-    rollback(Rest);
-rollback([{_, {exception}} | Rest]) ->
-    rollback(Rest);
 rollback([#{'_sign' := {exception}} | Rest]) ->
     rollback(Rest);
 rollback([#{'_sign' := exception} | Rest]) ->
@@ -1465,15 +1363,15 @@ try_exit(State) ->
 ensure_sign(#{'_sign' := _} = State) ->
     State;
 ensure_sign(#{'_status' := exception} = State) ->
-    State#{'_sign' => exception};
+    State#{'_sign' => {exception}};
 ensure_sign(#{'_reason' := normal} = State) ->
-    State#{'_sign' => stop};
+    State#{'_sign' => {stop}};
 ensure_sign(#{'_reason' := shutdown} = State) ->
-    State#{'_sign' => stop};
+    State#{'_sign' => {stop}};
 ensure_sign(#{'_reason' := {shutdown, _}} = State) ->
-    State#{'_sign' => stop};
+    State#{'_sign' => {stop}};
 ensure_sign(State) ->
-    State#{'_sign' => exception}.
+    State#{'_sign' => {exception}}.
 
 %% If FSM is not stopped normally, sign of the FSM is abort. The FSM
 %% can then be reloaded to continue running. In such case, '_output'
@@ -1484,13 +1382,13 @@ stop_fsm(#{'_state' := {link, Pid, _}} = Fsm, Reason) ->
     case stop(Pid, Reason, Timeout) of
         {ok, Output} ->
             Fsm#{'_state' := Output,
-                 '_sign' => abort};
+                 '_sign' => {escape}};
         {stopped, Result} ->
-            Fsm#{'_state' := {Result, {exception}},
-                 '_sign' => exception};
+            Fsm#{'_state' := {Result, {abort}},
+                 '_sign' => {abort}};
         {error, Error} ->
             Fsm#{'_state' := {Error, exception},
-                 '_sign' => exception}
+                 '_sign' => {exception}}
     end;
 stop_fsm(Fsm, _) ->
     Fsm.
@@ -1560,7 +1458,7 @@ make_report([], _) ->
 make_report(<<"all">>, State) ->
     State;
 make_report(<<"default">>, State) ->
-    make_report(['_name', '_sign', '_output', '_recovery'], State);
+    make_report(['_id', '_sign', '_output', '_recovery'], State);
 %% Selections is a list of attributes to yield.
 make_report(Selections, State) ->
     maps:with(Selections, State).
@@ -1578,7 +1476,7 @@ flush_and_relay(Pid, Timeout) ->
         {'EXIT', _, _} ->
             flush_and_relay(Pid, Timeout);
         Message ->
-            Pid ! Message,
+            Pid ! {xl_intransition, Message},
             flush_and_relay(Pid, Timeout)
     after Timeout ->
             true
