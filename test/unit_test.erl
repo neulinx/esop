@@ -25,10 +25,10 @@ unit_test_() ->
             {"Active attribute", fun test4/0},
             {"Data traversal", fun test3/0},
             {"Basic access and subscribe", fun test2/0},
-            {"State behaviors", fun test1/0}],
-            %%{"Full coverage test.", fun coverage_test:coverage/0}],
+            {"State behaviors", fun test1/0},
+            {"Full coverage test.", fun coverage_test:coverage/0}],
     {timeout, 2, Test}.
-%%    {timeout, 2, []}.
+%%    {timeout, 2, [fun coverage_test:isolate/0]}.
 
 %%-------------------------------------------------------------------
 %% Behaviours
@@ -135,6 +135,8 @@ test_path(Pid) ->
     {ok, done} = xl:call([Pid, "b1"], {put, b1}),
     {ok, b1} = xl:call([Pid, "b1"], get),
     {ok, done} = xl:call([Pid, "b1"], delete),
+    {error, undefined} = xl:call([Pid, "a1", "x2", "key2"], get),    
+    {error, unknown} = xl:call([Pid, "a1", "a2"], other),
     {error, undefined} = xl:call([Pid, "b1"], get).
 
 %%-------------------------------------------------------------------
@@ -260,14 +262,14 @@ test6() ->
 %% c.recovery -> -2,
 %% d.recovary -> restart 
 %%-------------------------------------------------------------------
-dump_info() ->
-    receive
-        stop ->
-            ok;
-        Info ->
-            ?debugVal(Info),
-            dump_info()
-    end.
+%% dump_info() ->
+%%     receive
+%%         stop ->
+%%             ok;
+%%         Info ->
+%%             ?debugVal(Info),
+%%             dump_info()
+%%     end.
 
 test7() ->
     A0 = #{'_id' => a, next => 1, '_recovery' => {c}},
@@ -288,16 +290,17 @@ test7() ->
             end,
     Fsm = #{'_react' => React,
             '_recovery' => <<"rollback">>,
+            '_retry_interval' => 10,
             '_traces' => [],
             '_max_retry' => 4,
             '_id' => fsm,
             '_states' => States},
 
     %% ==== subscribe ====
-    Dump = spawn(fun dump_info/0),
+    %% Dump = spawn(fun dump_info/0),
     %% ==== normal loop ====
     {ok, F} = xl:start(Fsm),
-    subscribe(F, Dump),
+    %% subscribe(F, Dump),
     {ok, a} = xl:call([F, <<>>, '_id'], get),
     xl:cast([F, <<>>], transfer),
     {ok, b} = xl:call([F, <<>>, '_id'], get),
@@ -319,7 +322,7 @@ test7() ->
     #{'_output' := 4, '_id' := d} = Res,
     %% ==== recovery loop ====
     {ok, F1} = xl:start(Fsm#{'_max_pending_size' => 0}),
-    subscribe(F1, Dump),
+    %% subscribe(F1, Dump),
     {ok, a} = xl:call([F1, <<>>, '_id'], get),
     xl:cast([F1, <<>>], crash),  % => c
     {error, timeout} = xl:call([F1, <<>>, '_id'], get, 10),
@@ -332,7 +335,8 @@ test7() ->
     xl:cast([F1, <<>>], transfer),
     {ok, b} = xl:call([F1, <<>>, '_id'], get),
     xl:cast([F1, <<>>], crash),  % => rollback
-    {ok, b} = xl:call([F1, <<>>, '_id'], get),
+    timer:sleep(3),
+    {ok, b} = xl:call([F1, '_state', '_id'], get),
     xl:cast([F1, <<>>], transfer),  % => c
     {ok, c} = xl:call([F1, <<>>, '_id'], get),
     xl:cast([F1, <<>>], crash),  % => rollback -2

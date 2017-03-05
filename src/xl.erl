@@ -23,7 +23,7 @@
 -export([start/1, start/2, start/3]).
 -export([stop/1, stop/2, stop/3]).
 -export([call/2, call/3, call/4, cast/2, cast/3, reply/2, notify/2]).
--export([request/3, invoke/2, invoke/4]).
+-export([request/3, request/4, invoke/2, invoke/4]).
 -export([activate/2, attach/4, remove/2, remove/3]).
 
 %% -------------------------------------------------------------------
@@ -176,15 +176,16 @@
 %% There is no atomic or string type in raw data. Such strings are
 %% all binary type as <<"AtomOrString">>.
 -type active_key() :: {'link', process(), identifier()} |
-                      {'function', function()}.
+                      {'function', function()} |
+                      {'proxy', {process(), path()} | path()}.
 -type attribute() :: {'link', process(), identifier()} |
                      {'function', function()} |
                      {'state', state_d()} |
                      refers() |
                      term().
 %% Reference of another actor's attribute.
--type refer() :: {'refer', path() | {target(), tag()}}.
--type redirect() :: {'redirect', target()}.
+-type refer() :: {'refer', path() | {process(), path()}}.
+-type redirect() :: {'redirect', path() | {process(), path()}}.
 -type skip() :: {'redirect', []}.
 -type refers() :: refer() | redirect() | skip().
 -type monitors() :: #{identifier() => monitor()}.
@@ -524,11 +525,6 @@ call(Process, Path, Command, Timeout) ->
             {error, timeout}
     end.
 
-scall(Process, Command, #{'_timeout' := Timeout}) ->
-    call(Process, Command, Timeout);
-scall(Process, Command, _) ->
-    call(Process, Command, ?DFL_TIMEOUT).
-
 -spec cast(target(), Message :: term()) -> 'ok'.
 cast([Process | Path], Command) ->
     cast(Process, Path, Command);
@@ -563,8 +559,11 @@ stop_(Process, Reason, Timeout) ->
     Mref = monitor(process, Process),
     Process ! {xl_stop, Reason},
     receive
-        {xl_leave, From, Result} ->
+        {xl_leave, From, Result} when is_pid(From) ->
             catch From ! {ok, xl_leave_ack},
+            demonitor(Mref, [flush]),
+            {ok, Result};
+        {xl_leave, _, Result} ->
             demonitor(Mref, [flush]),
             {ok, Result};
         {'DOWN', Mref, _, _, Result} ->
@@ -617,7 +616,7 @@ invoke(get_raw, State) ->
 %% @notice: patch may override internal data.
 invoke({patch, Patch}, State) ->
     Update = fun(K, V, S) ->
-                     {ok, done, S1} = invoke(undefined, [K], {put, V}, S),
+                     {ok, done, S1} = request([K], {put, V}, S),
                      S1
              end,
     NewS = maps:fold(Update, State, Patch),
@@ -667,6 +666,13 @@ request(Path, Command, State) ->
             Done
     end.
 
+%% Invoke command to external process with path and timeout parameter.
+-spec request(process(), path(), term(), state()) -> result().
+request(Process, Path, Command, State) ->
+    Timeout = maps:get('_timeout', State, ?DFL_TIMEOUT),
+    {Code, Result} = call(Process, Path, Command, Timeout),
+    {Code, Result, State}.
+
 %% Asynchoronous version of request, return immediately.
 -spec invoke(from(), target(), Command :: term(), state()) -> result().
 invoke(_, [], Command, State) ->
@@ -701,6 +707,13 @@ invoke(From, [Key | Path], Command, State) ->
         %% Func should checkeck From value as above cases of process.
         {function, Func, S} ->  % relay request to message handler.
             Func({xlx, From, Path, Command}, S);
+        %% Redirect to external.
+        {proxy, {Process, NewStart}, S} ->
+            invoke(From, Process, NewStart ++ Path, Command, S);
+        %% Redirect to internal attribute.
+        {proxy, NewStart, S} ->
+            invoke(From, NewStart ++ Path, Command, S);
+        %% Internal data access.
         {data, Package, S} ->  % traverse local forest.
            case iterate(Command, Path, Package) of
                 {dirty, Data} ->
@@ -710,7 +723,17 @@ invoke(From, [Key | Path], Command, State) ->
             end;
         Error ->
             Error
-    end.
+    end;
+invoke(From, Process, Command, State) ->
+    invoke(From, Process, [], Command, State).
+
+invoke(undefined, Process, Path, Command, State) ->
+    Tag = make_ref(),
+    Process ! {xlx, {self(), Tag}, Path, Command},
+    {'_pending', Tag, State};
+invoke(From, Process, Path, Command, State) ->
+    Process ! {xlx, From, Path, Command},
+    {noreply, State}.
 
 iterate(touch, [], {Type, Data}) ->
     {Type, Data};
@@ -723,14 +746,14 @@ iterate(get_raw, [], Data) ->
 iterate({patch, V1}, [], V) when is_map(V) andalso is_map(V1) ->
     {dirty, maps:merge(V, V1)};
 iterate(_, [], _) ->
-    {error, badarg};
+    {error, unknown};
 iterate({put, Value}, [Key], Container) ->
     NewC = maps:put(Key, Value, Container),
     {dirty, NewC};
 iterate(delete, [Key], Container) ->
     NewC = maps:remove(Key, Container),
     {dirty, NewC};
-iterate(Command, [Key | Path], Container) ->
+iterate(Command, [Key | Path], Container) when is_map(Container) ->
     case maps:find(Key, Container) of
         {ok, Branch} ->
             case iterate(Command, Path, Branch) of
@@ -741,7 +764,10 @@ iterate(Command, [Key | Path], Container) ->
             end;
         error ->
             {error, undefined}
-    end.
+    end;
+iterate(_, _, _) ->
+    {error, undefined}.
+    
 
 %% Untie fatal link or monitor of the attribute reference. Attribute
 %% is removed too. If Stop is true, cast stop message to the
@@ -793,6 +819,8 @@ activate(Key, State) ->
             {process, Pid, State};
         {ok, {function, Func}} ->
             {function, Func, State};
+        {ok, {proxy, Path}} ->
+            {proxy, Path, State};
         {ok, {Type, Data}} ->
             attach(Type, Data, Key, State);
         {ok, Value} ->
@@ -856,12 +884,14 @@ attach(state, Data, Key, State) ->
 attach(data, Data, Key, State) ->
     {data, Data, State#{Key => Data}};
 %% reference type, may cause recurisively request.
-attach(refer, {Path, Id}, Key, State) ->  % external reference.
-    {Code, Result} = scall(Path, {touch, Id}, State),
-    attach(Code, Result, Key, State);
+attach(refer, {Process, Path}, Key, State) ->  % external reference.
+    {Code, Result, State1} = request(Process, Path, touch, State),
+    attach(Code, Result, Key, State1);
 attach(refer, Path, Key, State) ->  % internal reference.
     {Code, Result, S} = request(Path, touch, State),
     attach(Code, Result, Key, S);
+attach(redirect, Path, Key, State) ->
+    {proxy, Path, State#{Key => {proxy, Path}}};
 %% Error or volatile data need not cache in attribute Key.
 attach(Type, Data, _Key, State) ->
     {Type, Data, State}.
@@ -903,6 +933,7 @@ prepare(Ok, false) ->
 prepare({ok, State}, true) ->
     %% Active '_states' and '_traces' at first.
     {_, _, S} = activate('_states', State),
+    %% todo: trace log for non-fsm actor.
     {_, _, S1} = activate('_traces', S),
     %% load dependent links.
     S2 = preload(S1),
@@ -1047,11 +1078,17 @@ post_handle({Code, Stop, Result, S}, Source) ->
 %% - In failover status, message may be queued in _pending_queue, that
 %%   may be relayed when FSM be recovered.
 %% --------------------------------------------------------------------
+%% 
 %% Do not spread xl_enter and xl_wakeup messages to children.
 %% default_react(xl_enter, State) ->
 %%     {noreply, State};
 %% default_react(xl_wakeup, State) ->
 %%     {noreply, State};
+%% Drop transition message if this actor is not FSM.
+%% default_react({xl_leave, From, _}, State) when is_pid(From) ->
+%%     catch From ! {ok, xl_leave_ack},
+%%     {noreply, State};
+
 %% External links of active attributes and subscribers are all
 %% processes monitored by the actor. All of them may raise 'DOWN'
 %% events at ending.
@@ -1079,14 +1116,12 @@ default_react({xl_retry, Recovery}, #{'_status' := failover} = Fsm) ->
 default_react({xl_leave, From, Output}, #{'_state' := _} = Fsm) ->
     catch From ! {ok, xl_leave_ack},
     transfer(Fsm, Output);
-%% Drop transition message if this actor is not FSM.
-default_react({xl_leave, From, _}, State) when is_pid(From) ->
-    catch From ! {ok, xl_leave_ack},
-    {noreply, State};
 %% Failover status of FSM, cache the messages into pending queue.
-%% Notice: if _max_pending_size is not present, do not cache message.
 default_react({xl_intransition, Message}, State) ->
     enqueue_message(Message, State);
+default_react({xlx, From, [<<>> | Path], Command}, 
+              #{'_status' := failover} = State) ->
+    enqueue_message({xlx, From, Path, Command}, State);
 default_react({xlx, From, ['_state' | Path], Command}, 
               #{'_status' := failover} = State) ->
     enqueue_message({xlx, From, Path, Command}, State);
@@ -1315,8 +1350,7 @@ retry(#{'_output' := Output} = Fsm, Vector) ->
 archive(#{'_traces' := {function, Traces}} = Fsm, Trace) ->
     Traces({log, Trace}, Fsm);
 archive(#{'_traces' := {link, Traces, _}} = Fsm, Trace) ->
-    {Code, Result} = scall(Traces, {xl_trace, {log, Trace}}, Fsm),
-    {Code, Result, Fsm};
+    request(Traces, [], {xl_trace, {log, Trace}}, Fsm);
 archive(#{'_traces' := Traces} = Fsm, Trace)  ->
     Limit = maps:get('_max_traces', Fsm, ?MAX_TRACES),
     Traces1 = enqueue(Trace, Traces, Limit),
@@ -1327,8 +1361,7 @@ archive(Fsm, _Trace) ->
 backtrack(Back, #{'_traces' := {function, Traces}} = Fsm) ->
     Traces({backtrack, Back}, Fsm);
 backtrack(Back, #{'_traces' := {link, Traces, _}} = Fsm) ->
-    {Code, Result} = scall(Traces, {xl_trace, {backtrack, Back}}, Fsm),
-    {Code, Result, Fsm};
+    request(Traces, [], {xl_trace, {backtrack, Back}}, Fsm);
 backtrack(<<"rollback">>, #{'_traces' := Traces} = Fsm)  ->
     {Code, Result} = rollback(Traces),
     {Code, Result, Fsm};    
