@@ -73,13 +73,18 @@ coverage() ->
     {error, {{preload_failure, undefined}, _}} =
         xl:start(#{'_preload' => [a]}),
 
-    {ok, P7} = xl:start(#{}),
+    F7 = fun({xlx, _, [], xl_enter}, S) ->
+                 {ok, done, S};
+            (_, S) ->
+                 {ok, unhandled, S}
+         end,
+    {ok, P7} = xl:start(#{'_react' => F7}),
     {ok, #{'_pid' := P7, '_status' := running}} = xl:call(P7, get_raw),
     L1 = #{'_state' => {process, P7}},
     {ok, P8} = xl:start(#{'_states' => L1,
                           '_preload' => ['_state']}),
     {ok, R2} = xl:call(P8, {subscribe, self()}),
-    {ok, done} = gen_server:call(P7, {xl_stop, normal}),
+    P7 ! xl_stop,
     receive
         {R2, _} ->
             ok
@@ -92,7 +97,8 @@ coverage() ->
 
     {ok, P9} = xl:start(#{}),
     {ok, R3} = xl:call(P9, {subscribe, self()}),
-    ok = gen_server:cast(P9, xl_stop),
+    %%~~ invoke(xl_fsm_stop
+    ok = gen_server:cast(P9, xl_fsm_stop),
     receive
         {R3, _} ->
             ok
@@ -124,8 +130,8 @@ coverage() ->
 
     {ok, P11} = xl:start(#{'_react' => F5}),
     {ok, R5} = xl:call(P11, {subscribe, self()}),
-
-    ok = gen_server:cast(P11, {xl_stop, normal}),
+    %%~~ _stop()
+    {error, timeout} = xl:stop(P11, normal, 0),
     receive
         {R5, _} ->
             ok
@@ -166,7 +172,7 @@ coverage() ->
     {ok, P15} = xl:start(M3),
     ok = xl:cast([P15, '_state'], xl_stop),
     {ok, m3} = xl:call([P15, name], get),
-    {error, undefined} = xl:call([P15, '_state'], get),
+    {ok, #{}} = xl:call([P15, '_state'], get),
     {stopped, normal} = xl:stop(P15),
 
     M4 = #{'_states' => #{},
@@ -181,7 +187,7 @@ coverage() ->
     M5 = #{'_states' => #{{start} => #{'_sign' => start}},
            '_max_steps' => 2,
            '_aftermath' => <<"halt">>,
-           '_state' => start},
+           '_state' => {start}},
     {ok, P17} = xl:start(M5),
     {ok, done} = xl:call([P17, <<>>], xl_stop),
     {ok, 2} = xl:call([P17, '_step'], get),
@@ -189,7 +195,7 @@ coverage() ->
     {ok, 3} = xl:call([P17, '_step'], get),
     {ok, halt} = xl:call([P17, '_status'], get),
     {stopped, normal} = xl:stop(P17),
-
+    
     F18 = fun({log, Trace}, Fsm) ->
                   Logs = maps:get(logs, Fsm, []),
                   {ok, done, Fsm#{logs => [Trace | Logs]}};
@@ -197,7 +203,7 @@ coverage() ->
                   History = lists:nth(-Back, Logs),
                   {ok, History, Fsm}
           end,
-    S18 = #{'_sign' => {exception}},
+    S18 = #{'_sign' => {exception}, '_payload' => undefined},
     M18 = #{'_states' => #{{start} => S18, '_traces' => {function, F18}},
             '_recovery' => -2,
             '_state' => #{'_sign' => {start}}},
@@ -218,7 +224,7 @@ coverage() ->
                            {start} => #{'_sign' => {exception}}},
             '_recovery' => -2,
             '_timeout' => 1000,
-            '_state' => start},
+            '_state' => {start}},
     {ok, P19} = xl:start(M19),
     {ok, running} = xl:call([P19, '_status'], get),
     {ok, done} = xl:call([P19, <<>>], xl_stop),
@@ -244,19 +250,19 @@ coverage() ->
             ok
     end,
 
-    F21 = fun(#{'_parent' := Fsm, '_input' := 1} = State) ->
+    F21 = fun(#{'_parent' := Fsm, '_payload' := 1} = State) ->
                   Fsm ! {xl_leave, undefined,
-                         #{'_output' => 2, '_sign' => start}},
+                         #{'_payload' => 2, '_sign' => start}},
                   State#{'_report' := false};
-             (#{'_parent' := Fsm, '_input' := 2} = State) ->
+             (#{'_parent' := Fsm, '_payload' := 2} = State) ->
                   Fsm ! {xl_leave, undefined,
-                         #{'_output' => 3, '_sign' => exception}},
+                         #{'_payload' => 3, '_sign' => exception}},
                   State#{'_report' := false};
-             (#{'_parent' := Fsm, '_input' := 3} = State) ->
+             (#{'_parent' := Fsm, '_payload' := 3} = State) ->
                   Fsm ! {xl_leave, undefined,
-                         #{'_output' => 4, '_sign' => exception}},
+                         #{'_payload' => 4, '_sign' => exception}},
                   State#{'_report' := false};
-             (#{'_parent' := Fsm, '_input' := 4} = State) ->
+             (#{'_parent' := Fsm, '_payload' := 4} = State) ->
                   Fsm ! {xl_leave, undefined, #{'_sign' => {exception}}},
                   State#{'_report' := false}
           end,
@@ -264,24 +270,24 @@ coverage() ->
     M21 = #{'_recovery' => <<"rollback">>,
             '_states' => #{{start} => S21},
             '_traces' => [],
-            '_state' => #{'_output' => 1, '_sign' => start}},
+            '_state' => #{'_payload' => 1, '_sign' => start}},
     {ok, P21} = xl:start(M21),
     {ok, done} = xl:call([P21, <<>>], xl_stop),
-    {ok, 2} = xl:call([P21, <<>>, '_input'], get),
+    {ok, 2} = xl:call([P21, <<>>, '_payload'], get),
     {ok, done} = xl:call([P21, <<>>], xl_stop),
     {ok, 1} = xl:call([P21, '_retry_count'], get),
     {ok, done} = xl:call([P21, <<>>], xl_stop),
     {ok, 2} = xl:call([P21, '_retry_count'], get),
     {stopped, normal} = xl:stop(P21),
-    M22 = M21#{'_state' => #{'_output' => 3, '_sign' => start}},
+    M22 = M21#{'_state' => #{'_payload' => 3, '_sign' => start}},
     {ok, P22} = xl:start(M22),
     {ok, done} = xl:call([P22, <<>>], xl_stop),
-    {ok, 3} = xl:call([P22, <<>>, '_input'], get),
+    {ok, 3} = xl:call([P22, <<>>, '_payload'], get),
     {stopped, normal} = xl:stop(P22),
-    M23 = M21#{'_state' => #{'_output' => 4, '_sign' => start}},
+    M23 = M21#{'_state' => #{'_payload' => 4, '_sign' => start}},
     {ok, P23} = xl:start(M23),
     {ok, done} = xl:call([P23, <<>>], xl_stop),
-    {ok, 4} = xl:call([P23, <<>>, '_input'], get),
+    {ok, 4} = xl:call([P23, <<>>, '_payload'], get),
     {stopped, normal} = xl:stop(P23),
 
     S24 = #{a => #{b => c}, x => 1},
@@ -296,22 +302,21 @@ coverage() ->
     {ok, P25} = xl:start(S25),
     {stopped, normal} = xl:stop(P25),
 
-    S26 = spawn(fun() -> ok end),
-    M26 = #{'_state' => {link, S26, undefined}},
+    M26 = #{state => {state, #{'_react' => F7}}, '_state' => {refer, [state]}},
     {ok, P26} = xl:start(M26),
     {stopped, normal} = xl:stop(P26),
 
     F27 = fun() ->
                   receive
-                      stop ->
-                          ignore_coverage
+                      {xlx, From, [], xl_enter} ->
+                          xl:reply(From, {ok, done})
                   end
           end,
     S27 = spawn(F27),
     M27 = #{'_state' => {link, S27, undefined},
             '_timeout' => 1},
     {ok, P27} = xl:start(M27),
-    {stopped, normal} = xl:stop(P27),
+    {stopped, noproc} = xl:stop(P27),
 
     S28 = #{'_parent' => P27, '_report' => true},
     {ok, P28} = xl:start(S28),
@@ -515,7 +520,29 @@ coverage() ->
     %% ?debugVal(xl:call(P50, get_raw)),
     {process, P50} = xl:call(P51, P50, touch, 10),
     {stopped, normal} = xl:stop(P50),
-    {stopped, normal} = xl:stop(P51).
+    {stopped, normal} = xl:stop(P51),
+
+    %%~~ init_fsm()
+    S52 = #{a => #{b => 1}, '_state' => {redirect, [a]}},
+    {error, {error, badarg}} = xl:start(S52),
+    %%~~ start_fsm(), transfer_2()
+    L53 = #{{a} => #{'_sign' => b},
+            {b} => 1,
+            {c} => {state, #{}},
+            '_state' => {a}},
+    {ok, P53} = xl:start(#{'_max_retry' => 2,
+                           '_states' => L53,
+                           '_recovery' => {c}}),
+    {ok, R53} = xl:call(P53, {subscribe, self()}),
+    {ok, done} = xl:call([P53, <<>>], xl_stop),
+    receive
+        {R53, {transition, #{'_sign' := b}}} ->
+            ok
+    end,
+    receive
+        {R53, {exit, #{'_sign' := {abort}}}} ->
+            stopped
+    end.
 
 isolate() ->
     ignore_coverage.

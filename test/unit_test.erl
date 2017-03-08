@@ -27,8 +27,9 @@ unit_test_() ->
             {"Basic access and subscribe", fun test2/0},
             {"State behaviors", fun test1/0},
             {"Full coverage test.", fun coverage_test:coverage/0}],
+    %% {timeout, 2, [fun test5/0]}.
+    %% {timeout, 2, [fun coverage_test:isolate/0]}.
     {timeout, 2, Test}.
-%%    {timeout, 2, [fun coverage_test:isolate/0]}.
 
 %%-------------------------------------------------------------------
 %% Behaviours
@@ -45,10 +46,10 @@ react({xlx, _, _, transfer}, S) ->
     Next = maps:get(next, S, stop),
     {stop, normal, S#{'_sign' => Next}}.
 
-exit(#{'_input' := Input} = S) ->
-    S#{'_output' => Input + 1};
+exit(#{'_payload' := Input} = S) ->
+    S#{'_payload' := Input + 1};
 exit(State) ->
-    State#{'_output' => "Done"}.
+    State#{'_payload' => "Done"}.
 
 subscribe(P) ->
     subscribe(P, self()).
@@ -64,16 +65,16 @@ test1() ->
     {ok, 3} = xl:call([A, test], get),
     {ok, Ref} = subscribe(A),
     {stopped, {shutdown, please}} = xl:stop(A, please),
-    {exit, #{'_output' := "Done"}} = receive
-                                                {Ref, Notify} ->
-                                                    Notify
-                                            end.
+    {exit, #{'_payload' := "Done"}} = receive
+                                         {Ref, Notify} ->
+                                             Notify
+                                     end.
 
 %%-------------------------------------------------------------------
 %% get, put, delete, subscribe, unsubscribe, notify
 %%-------------------------------------------------------------------
 test2() ->
-    {ok, Pid} = xl:start(#{'_output' => hello}),
+    {ok, Pid} = xl:start(#{'_payload' => hello}),
     {ok, running} = xl:call([Pid, '_status'], get),
     {ok, Pid} = xl:call([Pid, '_pid'], get),
     {ok, done} = xl:call([Pid, "a"], {put, a}),
@@ -105,7 +106,7 @@ test2() ->
     {ok, #{}} = xl:call([Pid, '_subscribers'], get),
     {ok, Ref3} = subscribe(Pid),
     {stopped, normal} = xl:stop(Pid),
-    {exit, #{'_output' := hello}} = receive
+    {exit, #{'_payload' := hello}} = receive
                                         {Ref3, Notify} ->
                                             Notify
                                     end.
@@ -156,7 +157,7 @@ test4() ->
            '_states' => #{"a3" => {refer, [reg, 3]},
                           reg => {process, realm}}},
     A3 = #{name => a3,
-           '_output' => a3_test,
+           '_payload' => a3_test,
            "key" => 123},
     F = fun({xlx, From, [], {get, Key}}, State) ->
                 Raw = maps:get(Key, State, undefined),
@@ -176,7 +177,7 @@ test4() ->
     {ok, done} = xl:call([R, 2], delete),
     {ok, M1} = subscribe([R, "a1", "a2", "a3"]),
     {stopped, normal} = xl:stop(R),
-    {exit, #{'_output' := a3_test}} = receive
+    {exit, #{'_payload' := a3_test}} = receive
                                           {M1, Notify} ->
                                               Notify
                                       end.
@@ -191,7 +192,7 @@ test5() ->
     T2 = #{'_id' => t2, '_sign' => {t3}, '_exit' => Exit},
     T3 = #{'_id' => t3, '_exit' => Exit},  % '_sign' => stop
     States = #{{<<"start">>} => T1, {t1, t2} => T2, {t3} => T3},
-    StartState = #{'_output' => 0, '_sign' => {<<"start">>}},
+    StartState = #{'_payload' => 0, '_sign' => {<<"start">>}},
     Fsm = #{'_state' => StartState,
             '_id' => fsm,
             '_states' => States},
@@ -212,22 +213,69 @@ test5() ->
     Fsm3 = #{'_state' => StartState,
              '_id' => fsm,
              '_states' => {state, P}},
-    test5(Fsm3).
-
+    test5(Fsm3),
+    
+    React4 = fun({xlx, {Pid, _}, [], xl_enter}, S) ->
+                     {ok, done, S#{fsm => Pid}};
+                (_, S) ->
+                     {ok, unhandled, S}
+             end,
+    Exit4 = fun(#{fsm := Pid} = S) ->
+                    {ok, Payload} = xl:call([Pid, '_payload'], get),
+                    xl:report(Pid, S#{'_payload' => Payload + 1})
+            end,
+    Actions = #{'_react' => React4, '_exit' => Exit4},
+    States4 = #{t2 => {state, {T2, Actions}},
+                {<<"start">>} => {state, {T1, Actions}},
+                {t1, t2} => {refer, [t2]},
+                {t3} => {refer, [t3]}},
+    Fsm4 = #{'_state' => StartState,
+             '_id' => fsm,
+             t3 => {state, {T3, Actions}},
+             '_states' => States4},
+    test5(Fsm4),
+    
+    Factory = fun(State) ->
+                 fun({xlx, _, _, xl_enter}, S) ->
+                         {ok, done, S};
+                    ({xlx, _, _, xl_stop}, S) ->
+                         {ok, Payload, S1} = xl:request(['_payload'], get, S),
+                         xl:report(self(), State#{'_payload' => Payload + 1}),
+                         {ok, done, S1};
+                    ({xlx, _, [Key], get}, S) ->
+                         {ok, maps:get(Key, State), S}
+                 end
+              end,
+    States5 = #{{<<"start">>} => {function, Factory(T1)},
+                {t1, t2} => {function, Factory(T2)},
+                {t3} => {function, Factory(T3)}},
+    Fsm5 = #{'_state' => StartState,
+             '_id' => fsm,
+             '_states' => States5},
+    test5(Fsm5).
+                                 
 test5(Fsm) ->
     {ok, F} = xl:start(Fsm),
+    {ok, Ref} = subscribe(F),
     {ok, t1} = xl:call([F, <<>>, '_id'], get),
     {ok, fsm} = xl:call([F, '_id'], get),
     {ok, done} = xl:call([F, <<>>], xl_stop),
+    receive
+        {Ref, {transition, #{'_payload' := 1}}} -> 
+            gotit
+    end,
     {ok, t2} = xl:call([F, '_state', '_id'], get),
     {ok, done} = xl:call([F, <<>>], xl_stop),
+    receive
+        {Ref, {transition, #{'_payload' := 2}}} -> 
+            gotit
+    end,
     {ok, t3} = xl:call([F, <<>>, '_id'], get),
-    {ok, Ref} = subscribe(F),
     {ok, done} = xl:call([F, <<>>], xl_stop),
-    {exit, #{'_output' := 3}} = receive
-                                    {Ref, Notify} ->
-                                        Notify
-                                end.
+    receive
+        {Ref, {exit, #{'_payload' := 3}}} -> 
+            gotit
+    end.
 
 %%-------------------------------------------------------------------
 %% Recovery for active attribute.
@@ -242,14 +290,24 @@ test6() ->
     %% ==== default recovery mode, heal on-demand.
     {ok, actor} = xl:call([Pid, name], get),
     {ok, a} = xl:call([Pid, a, name], get),
+    {ok, Ref} = subscribe([Pid, a]),
     xl:cast([Pid, a], crash),
-    timer:sleep(5),
+    receive
+        {Ref, {exit, Output}} ->
+            #{'_sign' := {exception}} = Output,
+            timer:sleep(5)
+    end,
+    {ok, running} = xl:call([Pid, '_status'], get),
     {error, undefined} = xl:call([Pid, a], get_raw),
     {ok, a} = xl:call([Pid, a, name], get),
     %% ==== "restart" recovery mode, heal immediately.
     {ok, b} = xl:call([Pid, b, name], get),
+    {ok, RefB} = subscribe([Pid, b]),
     xl:cast([Pid, b], crash),
-    timer:sleep(5),
+    receive
+        {RefB, {exit, #{'_sign' := {exception}}}} ->
+            timer:sleep(5)
+    end,
     {ok, {link, _, _}} = xl:call([Pid, b], get_raw),
     {ok, b} = xl:call([Pid, b, name], get),
     {stopped, normal} = xl:stop(Pid).
@@ -280,15 +338,18 @@ test7() ->
     B = xl:create(?MODULE, B0),
     C = xl:create(?MODULE, C0),
     D = xl:create(?MODULE, D0),
-    States = #{'_state' => #{'_output' => 0, '_sign' => {start}},
+    States = #{'_state' => #{'_payload' => 0, '_sign' => {start}},
                {start} => A,
                {a, 1} => B,
                {c} => C,
                {2} => D},
     React = fun({xlx, _, _, {max_pending_size, Size}}, S) ->
-                    {ok, done, S#{'_max_pending_size' => Size}}
+                    {ok, done, S#{'_max_pending_size' => Size}};
+               (_Info, S) ->
+                    {ok, unhandled, S}
             end,
     Fsm = #{'_react' => React,
+%%            '_report_items' => <<"all">>,
             '_recovery' => <<"rollback">>,
             '_retry_interval' => 10,
             '_traces' => [],
@@ -309,8 +370,6 @@ test7() ->
     xl:cast([F, <<>>], transfer),
     {ok, d} = xl:call([F, <<>>, '_id'], get),
     {error, undefined} = xl:call([F, '_retry_count'], get),
-    %% Traces = xl:call(F, {get, '_traces'}, [<<".">>]),
-    %% ?debugVal(Traces),
     {ok, 4} = xl:call([F, '_step'], get),
     %% stop
     {ok, Ref} = xl:call([F, <<>>], {subscribe, self()}),
@@ -319,7 +378,7 @@ test7() ->
                       {Ref, Notify} ->
                           Notify
                   end,
-    #{'_output' := 4, '_id' := d} = Res,
+    #{'_payload' := 4, '_id' := d} = Res,
     %% ==== recovery loop ====
     {ok, F1} = xl:start(Fsm#{'_max_pending_size' => 0}),
     %% subscribe(F1, Dump),
@@ -344,11 +403,9 @@ test7() ->
     {ok, 12} = xl:call([F1, '_step'], get),
     {ok, 4} = xl:call([F1, '_retry_count'], get),
     {ok, Ref1} = xl:call(F1, {subscribe, self()}),
-    %% Traces = xl:call(F1, {get, '_traces'}, [<<".">>]),
-    %% ?debugVal(Traces),
     xl:cast([F1, <<>>], crash),  % => exceed max retry count
     {exit, Res1} = receive
                        {Ref1, Notify1} ->
                            Notify1
                    end,
-    #{'_output' := 3, '_id' := fsm} = Res1.
+    #{'_payload' := 3, '_id' := fsm} = Res1.
