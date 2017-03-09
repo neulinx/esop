@@ -203,8 +203,11 @@ coverage() ->
                   History = lists:nth(-Back, Logs),
                   {ok, History, Fsm}
           end,
+    F19 = fun({xlx, _, [], {xl_trace, Log}}, Fsm) ->
+                  F18(Log, Fsm)
+          end,
     S18 = #{'_sign' => {exception}, '_payload' => undefined},
-    M18 = #{'_states' => #{{start} => S18, '_traces' => {function, F18}},
+    M18 = #{'_states' => #{{start} => S18, '_traces' => {function, F19}},
             '_recovery' => -2,
             '_state' => #{'_sign' => {start}}},
     {ok, P18} = xl:start(M18),
@@ -216,9 +219,6 @@ coverage() ->
     {ok, 4} = xl:call([P18, '_step'], get),
     {stopped, normal} = xl:stop(P18),
 
-    F19 = fun({xlx, _, [], {xl_trace, Log}}, Fsm) ->
-                  F18(Log, Fsm)
-          end,
     S19 = #{'_react' => F19, name => s19},
     M19 = #{'_states' => #{'_traces' => {state, S19},
                            {start} => #{'_sign' => {exception}}},
@@ -316,7 +316,7 @@ coverage() ->
     M27 = #{'_state' => {link, S27, undefined},
             '_timeout' => 1},
     {ok, P27} = xl:start(M27),
-    {stopped, noproc} = xl:stop(P27),
+    {stopped, _} = xl:stop(P27),
 
     S28 = #{'_parent' => P27, '_report' => true},
     {ok, P28} = xl:start(S28),
@@ -499,12 +499,14 @@ coverage() ->
     {ok, 1} = xl:call([P50, a], get),
     L51 = #{x => {redirect, []},
             y => {redirect, [b, c]},
-            z => {redirect, {P50, [b]}}},
+            z => {redirect, {P50, [b]}},
+            p => {redirect, P50}},
     S51 = S50#{'_states' => L51},
     {ok, P51} = xl:start(S51),
     {ok, 2} = xl:call([P51, x, d], get),
     {ok, 3} = xl:call([P51, y], get),
     {ok, 3} = xl:call([P51, z, c], get),
+    {ok, 3} = xl:call([P51, p, b, c], get),
     {ok, done} = xl:call(P51, {patch, S48}),
     {ok, 2} = xl:call([P51, x, d], get),
     {ok, 2} = xl:call([P51, y], get),
@@ -542,7 +544,22 @@ coverage() ->
     receive
         {R53, {exit, #{'_sign' := {abort}}}} ->
             stopped
-    end.
+    end,
+    
+    %%~~ deliver()
+    F54 = fun({xlx, From, [Key], test}, S) ->
+                  xl:deliver([Key], {From, test}, S)
+          end,
+    F541 = fun({From, test}, S) ->
+                   xl:reply(From, {ok, passed}),
+                   {ok, S}
+           end,
+    S54 = #{x => {function, F541}, y => #{}, '_react' => F54},
+    {ok, P54} = xl:start(S54),
+    {ok, passed} = xl:call([P54, x], test),
+    {error, undefined} = xl:call([P54, a], test),
+    {error, badarg} = xl:call([P54, y], test),
+    {stopped, normal} = xl:stop(P54).
 
 isolate() ->
     ignore_coverage.

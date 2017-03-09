@@ -23,7 +23,7 @@
 -export([start/1, start/2, start/3]).
 -export([stop/1, stop/2, stop/3]).
 -export([call/2, call/3, call/4, cast/2, cast/3, reply/2, notify/2]).
--export([request/3, request/4, invoke/2, invoke/4]).
+-export([deliver/3, request/3, invoke/2, invoke/4]).
 -export([activate/2, attach/4, remove/2, remove/3]).
 -export([report/2, report/3]).
 
@@ -125,7 +125,7 @@
              '_report_items' => binary() | list(),
              '_sign' => sign(),
              '_step' => non_neg_integer(),
-             '_traces' => active_key() | map(),
+             '_traces' => active_key() | list(),
              '_retry_count' => non_neg_integer(),
              '_pending_queue' => list(),
              '_max_pending_size' => limit(),
@@ -159,7 +159,7 @@
 -type process() :: pid() | (LocalName :: atom()).
 -type tag() :: atom() | string() | binary() | integer() | tuple().
 -type path() :: [process() | tag()].
--type target() :: process() | path().
+-type target() :: process() | path() | {process(), path()}.
 -type from() :: {To :: process(), Tag :: identifier()} | 'undefined'.
 %% Vector is set of dimentions. Raw data does not support tuple type,
 %% and list type is used. But string type in Erlang is list type
@@ -177,15 +177,15 @@
 %% all binary type as <<"AtomOrString">>.
 -type active_key() :: {'link', process(), identifier()} |
                       {'function', state_function()} |
-                      {'proxy', {process(), path()} | path()}.
+                      {'proxy', target()}.
 -type attribute() :: {'link', process(), identifier()} |
                      {'function', function()} |
                      {'state', state_d()} |
                      refers() |
                      term().
 %% Reference of another actor's attribute.
--type refer() :: {'refer', path() | {process(), path()}}.
--type redirect() :: {'redirect', path() | {process(), path()}}.
+-type refer() :: {'refer', target()}.
+-type redirect() :: {'redirect', target()}.
 -type skip() :: {'redirect', []}.
 -type refers() :: refer() | redirect() | skip().
 -type monitors() :: #{identifier() => monitor()}.
@@ -589,18 +589,35 @@ notify(Process, Info) ->
 %% Process messages with path, when react function does not handle it.
 %%
 %% Hierarchical data in a state data map can only support
-%% touch/get/put/delete operations.
+%% touch/get/put/delete/get_raw/patch operations.
 %%
 %% request/3 is sync operation that wait for expected reply. Instant
-%% return version is invoke/4 with first parameter 'undefined':
+%% return version is invoke/4 with first parameter 'undefined'.
 %% 
-%% invoke(undefined, Path, Notification, State).
+%% invoke/2/4/5: Compare to similar functions call and cast, function
+%% invoke is called inside actor process while call/cast is called
+%% outside the process.
 %%
-%% Compare with similar functions call and cast, function invoke is
-%% called inside actor process while call/cast is called outside the
-%% process.
+%% deliver/3: Directly diliver message to destination by path without
+%% waiting for response (still need waiting for addressing). It is
+%% different from invoke function with path.
 %% --------------------------------------------------------------------
-%%%% request to the actor without special key.
+-spec deliver(target(), term(), state()) -> result().
+%% Target of delivery must be active thing.
+deliver(Target, Message, State) ->
+    case request(Target, touch, State) of
+        {process, Pid, NewS} ->
+            Pid ! Message,
+            {ok, NewS};
+        {function, Func, NewS} ->
+            Func(Message, NewS);
+        {error, _, _} = Error ->
+            Error;
+        {_, _, NewS} ->
+            {error, badarg, NewS}
+    end.
+
+%%%% request to the actor, not to attribute.
 -spec invoke(command(), state()) -> result().
 %% May be request for far far away source for shortcut link.
 invoke(touch, State) ->
@@ -681,13 +698,6 @@ request(Path, Command, State) ->
             Done
     end.
 
-%% Invoke command to external process with path and timeout parameter.
--spec request(process(), path(), term(), state()) -> result().
-request(Process, Path, Command, State) ->
-    Timeout = maps:get('_timeout', State, ?DFL_TIMEOUT),
-    {Code, Result} = call(Process, Path, Command, Timeout),
-    {Code, Result, State}.
-
 %% Asynchoronous version of request, return immediately.
 -spec invoke(from(), target(), Command :: term(), state()) -> result().
 %% Extract FSM pid for xl_enter request.
@@ -726,8 +736,11 @@ invoke(From, [Key | Path], Command, State) ->
         {proxy, {Process, NewStart}, S} ->
             invoke(From, Process, NewStart ++ Path, Command, S);
         %% Redirect to internal attribute.
-        {proxy, NewStart, S} ->
+        {proxy, NewStart, S} when is_list(NewStart) ->
             invoke(From, NewStart ++ Path, Command, S);
+        %% Redirect to external process.
+        {proxy, Process, S} ->
+            invoke(From, Process, Path, Command, S);
         %% Internal data access.
         {data, Package, S} ->  % traverse local forest.
            case iterate(Command, Path, Package) of
@@ -739,9 +752,12 @@ invoke(From, [Key | Path], Command, State) ->
         Error ->
             Error
     end;
+invoke(From, {Process, Path}, Command, State) ->
+    invoke(From, Process, Path, Command, State);
 invoke(From, Process, Command, State) ->
     invoke(From, Process, [], Command, State).
 
+%% From value of 'undefined' is different from 'noreply'. 
 invoke(undefined, Process, Path, Command, State) ->
     Tag = make_ref(),
     Process ! {xlx, {self(), Tag}, Path, Command},
@@ -899,14 +915,11 @@ attach(state, Data, Key, State) ->
 attach(data, Data, Key, State) ->
     {data, Data, State#{Key => Data}};
 %% reference type, may cause recurisively request.
-attach(refer, {Process, Path}, Key, State) ->  % external reference.
-    {Code, Result, State1} = request(Process, Path, touch, State),
-    attach(Code, Result, Key, State1);
-attach(refer, Path, Key, State) ->  % internal reference.
-    {Code, Result, S} = request(Path, touch, State),
+attach(refer, Target, Key, State) ->
+    {Code, Result, S} = request(Target, touch, State),
     attach(Code, Result, Key, S);
-attach(redirect, Path, Key, State) ->
-    {proxy, Path, State#{Key => {proxy, Path}}};
+attach(redirect, Target, Key, State) ->
+    {proxy, Target, State#{Key => {proxy, Target}}};
 %% Error or volatile data need not cache in attribute Key.
 attach(Type, Data, _Key, State) ->
     {Type, Data, State}.
@@ -1087,10 +1100,7 @@ post_handle({Code, Stop, Result, S}, Source) ->
 %% Default handlers for messages are 'unhandled'
 %%
 %% Special cases for FSM type actor:
-%% - Request with path such as {xlx, From, Path, Command} do not relay
-%%   to state.
-%% - xl_leave, xl_retry, 'DOWN' and 'EXIT' message do not relay to state.
-%% - Request with path [<<".">>] is explicit request do not relay to state.
+%% - Request with path [<<>>] is explicit request relay to state.
 %% - In failover status, message may be queued in _pending_queue, that
 %%   may be relayed when FSM be recovered.
 %% --------------------------------------------------------------------
@@ -1133,8 +1143,11 @@ default_react({xl_leave, From, Output}, #{'_state' := _} = Fsm) ->
     catch From ! {ok, xl_leave_ack},
     transfer(Fsm, Output);
 %% Failover status of FSM, cache the messages into pending queue.
-default_react({xl_intransition, Message}, State) ->
+default_react({xl_intransition, Message}, #{'_status' := failover} = State) ->
     enqueue_message(Message, State);
+%% Transition progress is over.
+default_react({xl_intransition, Message}, State) ->
+    deliver(['_state'], Message, State);
 default_react({xlx, From, ['_state' | Path], Command}, 
               #{'_status' := failover} = State) ->
     enqueue_message({xlx, From, Path, Command}, State);
@@ -1144,9 +1157,6 @@ default_react({xlx, From, Path, Command}, State) ->
 default_react(Info, State) ->
     invoke(Info, State).
 
-enqueue_message(Message, #{'_state' := {link, Pid, _}} = State) ->
-    Pid ! Message,
-    {noreply, State};
 enqueue_message(Message, State) ->
     Size = maps:get('_max_pending_size', State, infinity),
     Q = maps:get('_pending_queue', State, []),
@@ -1261,7 +1271,7 @@ transfer_2(Fsm, Vector, Recovery) ->
                     %% Try to heal from exceptional state.
                     recover(Fsm2, Recovery);
                 _ ->
-                    transfer_2(Fsm2, exception, Recovery)
+                    transfer_2(Fsm2, {exception}, Recovery)
             end;
         {Type, Data, Fsm1} ->  % enter new state.
             %% Accept only data of map type as state, process or function.
@@ -1270,7 +1280,7 @@ transfer_2(Fsm, Vector, Recovery) ->
                     {ok, Fsm2};
                 {Sign, Reason, Fsm2} ->
                     Fsm3 = Fsm2#{'_reason' => {Sign, Reason}},
-                    transfer_2(Fsm3, exception, Recovery)
+                    transfer_2(Fsm3, {exception}, Recovery)
             end
     end.
 
@@ -1329,7 +1339,7 @@ fsm_start(T, D, Q, F) ->
         {process, Pid, F1} ->
             %% External process should request payload to FSM, beware
             %% of deadlock.
-            case request(Pid, [], xl_enter, F1) of
+            case request(Pid, xl_enter, F1) of
                 {ok, done, _} = Done->
                     [Pid ! Message || Message <- Q],
                     Done;
@@ -1337,7 +1347,7 @@ fsm_start(T, D, Q, F) ->
                     Error
             end;
         {function, Func, F1} ->
-            %% Payload and request queue are in F1.
+            %% Payload and message queue are in F1.
             Func({xlx, noreply, [], xl_enter}, F1);
         {_, _, F1} ->  % don't support proxy and other type data.
             {error, badarg, F1}
@@ -1387,26 +1397,22 @@ retry(Fsm, Bypass) ->
 %% If '_traces' is not present, archive do nothing. So trace log is
 %% disable default, but '_max_traces' default value is
 %% MAX_TRACES. Trace is form of state() | {Output, Vector}.
-archive(#{'_traces' := {function, Traces}} = Fsm, Trace) ->
-    Traces({log, Trace}, Fsm);
-archive(#{'_traces' := {link, Traces, _}} = Fsm, Trace) ->
-    request(Traces, [], {xl_trace, {log, Trace}}, Fsm);
-archive(#{'_traces' := Traces} = Fsm, Trace)  ->
+archive(#{'_traces' := Traces} = Fsm, Trace)  when is_list(Traces) ->
     Limit = maps:get('_max_traces', Fsm, ?MAX_TRACES),
     Traces1 = enqueue(Trace, Traces, Limit),
     {ok, done, Fsm#{'_traces' => Traces1}};
-archive(Fsm, _Trace) ->
+archive(#{'_traces' := _} = Fsm, Trace) ->
+    request(['_traces'], {xl_trace, {log, Trace}}, Fsm);
+archive(Fsm, _) ->
     {error, undefined, Fsm}.
 
-backtrack(Back, #{'_traces' := {function, Traces}} = Fsm) ->
-    Traces({backtrack, Back}, Fsm);
-backtrack(Back, #{'_traces' := {link, Traces, _}} = Fsm) ->
-    request(Traces, [], {xl_trace, {backtrack, Back}}, Fsm);
-backtrack(<<"rollback">>, #{'_traces' := Traces} = Fsm)  ->
+backtrack(<<"rollback">>, #{'_traces' := Traces} = Fsm) when is_list(Traces) ->
     {Code, Result} = rollback(Traces),
     {Code, Result, Fsm};    
-backtrack(Back, #{'_traces' := Traces} = Fsm)  ->
-    {ok, lists:nth(-Back, Traces), Fsm}.
+backtrack(Back, #{'_traces' := Traces} = Fsm) when is_list(Traces) ->
+    {ok, lists:nth(-Back, Traces), Fsm};
+backtrack(Back, Fsm) ->
+    request(['_traces'], {xl_trace, {backtrack, Back}}, Fsm).
 
 rollback([]) ->
     {error, incurable};
@@ -1451,14 +1457,9 @@ ensure_sign(State) ->
 %% of the FSM is previous result because of current state may have no
 %% time to yield output.
 %%
-%% Internal state process, is exclusive used by one FSM.
-stop_fsm(#{'_state' := {link, Pid, Pid}} = Fsm, Reason) ->
-    Timeout = maps:get('_timeout', Fsm, ?DFL_TIMEOUT),
-    Output = stop(Pid, Reason, Timeout),
-    Fsm1 = maps:remove('_state', Fsm),
-    Fsm1#{'_reason' => Output, '_sign' => {abort}};
-%% External state process or function shared same process with FSM.
-stop_fsm(#{'_state' := _} = Fsm, Reason) -> 
+%% Internal state process, is exclusive used by one FSM.  External
+%% state process or function shared same process with FSM.
+stop_fsm(#{'_state' := _} = Fsm, Reason) ->
     {Code, Result, Fsm1} = request(['_state'], {xl_fsm_stop, Reason}, Fsm),
     Fsm2 = maps:remove('_state', Fsm1),
     Fsm2#{'_reason' => {Code, Result}, '_sign' => {abort}};
