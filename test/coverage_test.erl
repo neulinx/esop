@@ -15,6 +15,11 @@
 create(Data) ->
     Data#{test => yes}.
 
+react({xlx, _, [], xl_enter}, S) ->
+    {ok, done, S};
+react(_, S) ->
+    {ok, unhandled, S}.
+
 coverage() ->
     {ok, P1} = xl:start_link(undefined, #{'_timeout' => 1000}, []),
     {stopped, normal} = xl:stop(P1),
@@ -73,12 +78,7 @@ coverage() ->
     {error, {{preload_failure, undefined}, _}} =
         xl:start(#{'_preload' => [a]}),
 
-    F7 = fun({xlx, _, [], xl_enter}, S) ->
-                 {ok, done, S};
-            (_, S) ->
-                 {ok, unhandled, S}
-         end,
-    {ok, P7} = xl:start(#{'_react' => F7}),
+    {ok, P7} = xl:start(#{'_react' => fun react/2}),
     {ok, #{'_pid' := P7, '_status' := running}} = xl:call(P7, get_raw),
     L1 = #{'_state' => {process, P7}},
     {ok, P8} = xl:start(#{'_states' => L1,
@@ -302,7 +302,8 @@ coverage() ->
     {ok, P25} = xl:start(S25),
     {stopped, normal} = xl:stop(P25),
 
-    M26 = #{state => {state, #{'_react' => F7}}, '_state' => {refer, [state]}},
+    M26 = #{state => {state, #{'_react' => fun react/2}},
+            '_state' => {refer, [state]}},
     {ok, P26} = xl:start(M26),
     {stopped, normal} = xl:stop(P26),
 
@@ -539,10 +540,14 @@ coverage() ->
     {ok, done} = xl:call([P53, <<>>], xl_stop),
     receive
         {R53, {transition, #{'_sign' := b}}} ->
-            ok
+            b
     end,
     receive
-        {R53, {exit, #{'_sign' := {abort}}}} ->
+        {R53, {transition, {c}}} ->
+            c
+    end,
+    receive
+        {R53, {exit, #{'_sign' := {escape}}}} ->
             stopped
     end,
     
@@ -559,7 +564,33 @@ coverage() ->
     {ok, passed} = xl:call([P54, x], test),
     {error, undefined} = xl:call([P54, a], test),
     {error, badarg} = xl:call([P54, y], test),
-    {stopped, normal} = xl:stop(P54).
+    {stopped, normal} = xl:stop(P54),
+    
+    %%~~ stop_fsm()
+    F55 = fun({xlx, _, [], xl_enter}, S) ->
+                  {ok, done, S};
+             ({xl_fsm_stop, _}, S) ->
+                  {ok, timer:sleep(100), S};
+             (_, S) ->
+                  {ok, unhandled, S}
+          end,
+    L55 = #{'_state' => {state, #{'_react' => F55}}},
+    S55 = #{'_timeout' => 5, '_states' => L55},
+    {ok, P55} = xl:start(S55),
+    {ok, R55} = xl:call(P55, {subscribe, self()}),
+    P55 ! xl_stop,
+    receive
+        {R55, {exit, #{'_sign' := {abort}}}} ->
+            abort
+    end,
+    S56 = #{'_state' => {function, fun react/2}},
+    {ok, P56} = xl:start(S56),
+    {ok, R56} = xl:call(P56, {subscribe, self()}),
+    P56 ! xl_stop,
+    receive
+        {R56, {exit, #{'_sign' := {stop}}}} ->
+            stop
+    end.
 
 isolate() ->
     ignore_coverage.

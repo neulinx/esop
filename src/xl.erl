@@ -552,17 +552,20 @@ stop(Process, Reason) ->
 
 -spec stop(process(), reason(), timeout()) -> output().
 stop(Process, normal, Timeout) ->
-    stop_(Process, normal, Timeout);
+    Process ! {xl_stop, normal},
+    wait_stop(Process, Timeout);
 stop(Process, shutdown, Timeout) ->
-    stop_(Process, shutdown, Timeout);
+    Process ! {xl_stop, shutdown},
+    wait_stop(Process, Timeout);
 stop(Process, {shutdown, _} = Reason, Timeout) ->
-    stop_(Process, Reason, Timeout);
-stop(Process, Reason, Timeout) ->
-    stop_(Process, {shutdown, Reason}, Timeout).
-
-stop_(Process, Reason, Timeout) ->
-    Mref = monitor(process, Process),
     Process ! {xl_stop, Reason},
+    wait_stop(Process, Timeout);
+stop(Process, Reason, Timeout) ->
+    Process ! {xl_stop, {shutdown, Reason}},
+    wait_stop(Process, Timeout).
+
+wait_stop(Process, Timeout) ->
+    Mref = monitor(process, Process),
     receive
         {xl_leave, From, Result} when is_pid(From) ->
             catch From ! {ok, xl_leave_ack},
@@ -1241,8 +1244,6 @@ transfer_1(Fsm, Indication) when is_map(Indication) ->
     Fsm1 = case maps:find('_payload', Indication) of
                error ->
                    Fsm;
-               {ok, undefined} ->
-                   Fsm;
                {ok, Payload} ->
                    Fsm#{'_payload' => Payload}
            end,
@@ -1459,12 +1460,33 @@ ensure_sign(State) ->
 %%
 %% Internal state process, is exclusive used by one FSM.  External
 %% state process or function shared same process with FSM.
-stop_fsm(#{'_state' := _} = Fsm, Reason) ->
-    {Code, Result, Fsm1} = request(['_state'], {xl_fsm_stop, Reason}, Fsm),
-    Fsm2 = maps:remove('_state', Fsm1),
-    Fsm2#{'_reason' => {Code, Result}, '_sign' => {abort}};
+stop_fsm(#{'_state' := {link, Pid, _}} = Fsm, Reason) ->
+    Pid ! {xl_fsm_stop, Reason},
+    Timeout = maps:get('_timeout', Fsm, ?DFL_TIMEOUT),
+    case wait_stop(Pid, Timeout) of
+        {ok, Result} ->  % result must be map format.
+            accept_output(Result, Fsm);
+        {stopped, Result} ->
+            Fsm#{'_state' := {escape}, '_sign' => {escape},
+                 '_reason' => Result};
+        Error ->
+            Fsm#{'_state' := {abort}, '_sign' => {abort}, '_reason' => Error}
+    end;
+stop_fsm(#{'_state' := {function, Func}} = Fsm, Reason) ->
+    {_, _, Fsm1} = Func({xl_fsm_stop, Reason}, Fsm),
+    Fsm1;
 stop_fsm(Fsm, _) ->
     Fsm.
+
+accept_output(Output, Fsm) ->
+    Sign = make_vector(Output),
+    Fsm1 = Fsm#{'_state' => Output, '_sign' => Sign},
+    case maps:find('_payload', Output) of
+        {ok, Payload} ->
+            Fsm1#{'_payload' => Payload};
+        _ ->
+            Fsm1
+    end.
 
 %% State transferring, yield and notifications.
 %% Goodbye, active attributes!
