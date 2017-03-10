@@ -1029,7 +1029,7 @@ init_fsm(Fsm) ->
             {_, _, Fsm3} = activate('_payload', Fsm2),
             case Type of
                 data ->
-                    transfer(Fsm2, Data);
+                    transfer(Fsm3, Data);
                 _ ->
                     case start_fsm(Type, Data, Fsm3) of
                         {ok, done, Fsm4} ->
