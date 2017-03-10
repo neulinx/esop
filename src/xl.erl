@@ -962,10 +962,10 @@ prepare({stop, Reason, _}, _) ->
 prepare(Ok, false) ->
     Ok;
 prepare({ok, State}, true) ->
-    %% Active '_states' and '_traces' at first.
-    {_, _, S} = activate('_states', State),
-    %% todo: trace log for non-fsm actor.
-    {_, _, S1} = activate('_traces', S),
+    %% Initialize id.
+    {_, _, S} = activate('_id', State),
+    %% Active '_states'.
+    {_, _, S1} = activate('_states', S),
     %% load dependent links.
     S2 = preload(S1),
     prepare(init_fsm(S2), false);
@@ -1019,22 +1019,25 @@ preload(State) ->
 %% '_payload' should reside in '_states' as initial values.
 %% --------------------------------------------------------------------
 init_fsm(Fsm) ->
-    %% Initialize payload as FSM input.
-    {_, _, Fsm1} = activate('_payload', Fsm),
-    %% Launch start state. Start state as introducer without archive
-    %% and recovery mechanisms.
-    case activate('_state', Fsm1) of
-        {error, undefined, Fsm2} ->  % not a FSM.
-            {ok, Fsm2};
-        {data, Indication, Fsm2} ->  % start indication.
-            transfer(Fsm2, Indication);
-        {Type, Data, Fsm2} ->  % Introducer, that is process or function.
-            case start_fsm(Type, Data, Fsm2) of
-                {ok, done, Fsm3} ->
-                    {ok, Fsm3};
-                {Code, Result, Fsm3} ->
-                    {stop, {Code, Result}, Fsm3}
-            end  
+    case activate('_state', Fsm) of
+        {error, undefined, Fsm1} ->  % not FSM.
+            {ok, Fsm1};
+        {Type, Data, Fsm1} ->
+            %% todo: trace log for non-fsm actor.
+            {_, _, Fsm2} = activate('_traces', Fsm1),
+            %% Initialize payload as FSM input.
+            {_, _, Fsm3} = activate('_payload', Fsm2),
+            case Type of
+                data ->
+                    transfer(Fsm2, Data);
+                _ ->
+                    case start_fsm(Type, Data, Fsm3) of
+                        {ok, done, Fsm4} ->
+                            {ok, Fsm4};
+                        {Code, Result, Fsm4} ->
+                            {stop, {Code, Result}, Fsm4}
+                    end
+            end
     end.
 
 %% --------------------------------------------------------------------
@@ -1317,6 +1320,12 @@ default_sign({_, Sign}) ->
 default_sign(Sign) ->
     Sign.
 
+%% DONOT delete the commented code lines because it is feature for
+%% upcoming version.
+%%
+%% %% Vertex of next state may be another vector.
+%% start_fsm(data, Data, Fsm) when not is_map(Data) ->
+%%     transfer(Fsm, Data);
 start_fsm(Type, Data, Fsm) ->
     Queue = maps:get('_pending_queue', Fsm, []),
     Fsm1 = Fsm#{'_status' => running, '_pending_queue' => []},
