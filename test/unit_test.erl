@@ -224,14 +224,14 @@ test5() ->
                     {ok, Payload} = xl:call([Pid, '_payload'], get),
                     xl:report(Pid, S#{'_payload' => Payload + 1})
             end,
-    Actions = #{'_react' => React4, '_exit' => Exit4},
-    States4 = #{t2 => {state, {T2, Actions}},
-                {<<"start">>} => {state, {T1, Actions}},
+    Behaviors = #{'_react' => React4, '_exit' => Exit4},
+    States4 = #{t2 => {state, {T2, Behaviors}},
+                {<<"start">>} => {state, {T1, Behaviors}},
                 {t1, t2} => {refer, [t2]},
                 {t3} => {refer, [t3]}},
     Fsm4 = #{'_state' => StartState,
              '_id' => fsm,
-             t3 => {state, {T3, Actions}},
+             t3 => {state, {T3, Behaviors}},
              '_states' => States4},
     test5(Fsm4),
     

@@ -102,7 +102,7 @@
              '_entry' => entry(),
              '_react' => react(),
              '_exit' => exit(),
-             '_actions' => actions(),
+             '_behaviors' => behaviors(),
              '_pid' => pid(),
              '_parent' => pid(),
              '_surname' => tag(), % Attribute name in the parent state.
@@ -194,12 +194,9 @@
 -type states() :: active_key() | states_map() | links_map().
 -type states_map() :: #{vector() => state()}.
 -type links_map() :: #{Key :: tag() => attribute()}.
-%% State data with overrided actions and recovery.
--type state_d() :: state() | {state(), actions()}.
--type actions() :: 'state' | module() | binary() | state_actions().
--type state_actions() :: #{'_entry' => entry(),
-                           '_exit' => exit(),
-                           '_react' => react()}.
+%% State data with overrided behaviors and recovery.
+-type state_d() :: state() | {state(), behaviors()}.
+-type behaviors() :: 'state' | module() | binary() | map().
 %% There is a potential recovery option 'undefined' as default
 %% recovery mode, crashed active attribute may be recovered by next
 %% 'touch'. Actually tag() is <<"restart">> or
@@ -844,8 +841,7 @@ remove(Key, #{'_monitors' := M} = State, Stop) ->
 %% Data types of attributes:
 %% {link, pid(), identifier()} |
 %% refers(),
-%% {state, {state(), actions()}} | {state, state()} | Value :: term().
-%% when actions() :: state | module() | Module :: binary() | Actions :: map().
+%% {state, {state(), behaviors()}} | {state, state()} | Value :: term().
 -spec activate(tag(), state()) -> active_return().
 activate(Key, State) ->
     case maps:find(Key, State) of
@@ -878,9 +874,9 @@ activate(Module, Key, Value, State) when is_atom(Module) ->
 activate(Module, Key, Value, State) when is_binary(Module) ->
     Module1 = binary_to_existing_atom(Module, utf8),
     activate(Module1, Key, Value, State);
-%% Actions is map type with state behaviors: #{'_entry', '_react', '_exit'}.
-activate(Actions, Key, Value, State) when is_map(Actions) ->
-    Value1 = maps:merge(Value, Actions),
+%% Behaviors is map type with state runtime attributes as a template.
+activate(Behaviors, Key, Value, State) when is_map(Behaviors) ->
+    Value1 = maps:merge(Value, Behaviors),
     activate_(Key, Value1, State);
 activate(_Unknown, _Key, _Value, State) ->    
     {error, unknown, State}.
@@ -909,11 +905,11 @@ attach(process, Process, Key, #{'_monitors' := M} = State) ->
     NewState = State#{Key => {link, Process, Mref}, '_monitors' := M1},
     {process, Process, NewState};
 %% state data to spawn link local child actor.
-attach(state, {Data, Actions}, Key, State) ->
-    activate(Actions, Key, Data, State);
+attach(state, {Data, Behaviors}, Key, State) ->
+    activate(Behaviors, Key, Data, State);
 attach(state, Data, Key, State) ->
-    Actions = maps:get('_actions', Data, state),
-    activate(Actions, Key, Data, State);
+    Behaviors = maps:get('_behaviors', Data, state),
+    activate(Behaviors, Key, Data, State);
 %% data only, copy it as initial value.
 attach(data, Data, Key, State) ->
     {data, Data, State#{Key => Data}};
