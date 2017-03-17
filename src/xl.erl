@@ -81,7 +81,7 @@
 %% transition'. State sets are inherited by default which means a key
 %% tuple with only edge name can match any 'from state'.
 %% 
-%% Binary type is not support by types and function
+%% Binary type is not supported by types and function
 %% specifications. All binary type attribute names are commented and
 %% binary string are replaced by tag() type currently.
 %% -------------------------------------------------------------------
@@ -176,10 +176,10 @@
 %% There is no atomic or string type in raw data. Such strings are
 %% all binary type as <<"AtomOrString">>.
 -type active_key() :: {'link', process(), identifier()} |
-                      {'function', state_function()} |
+                      state_function() |
                       {'proxy', target()}.
 -type attribute() :: {'link', process(), identifier()} |
-                     {'function', function()} |
+                     state_function() |
                      {'state', state_d()} |
                      refers() |
                      term().
@@ -847,12 +847,12 @@ activate(Key, State) ->
     case maps:find(Key, State) of
         {ok, {link, Pid, _}} ->
             {process, Pid, State};
-        {ok, {function, Func}} ->
-            {function, Func, State};
         {ok, {proxy, Path}} ->
             {proxy, Path, State};
         {ok, {Type, Data}} ->
             attach(Type, Data, Key, State);
+        {ok, Func} when is_function(Func)->
+            {function, Func, State};
         {ok, Value} ->
             {data, Value, State};
         error when Key =:= '_states' ->
@@ -896,7 +896,7 @@ activate_(Key, Value, #{'_monitors' := M} = State) ->
 -spec attach(tag(), Data :: term(), Key :: term(), state()) -> active_return().
 %% attach function to an active attribute.
 attach(function, Func, Key, State) ->
-    {function, Func, State#{Key => {function, Func}}};
+    {function, Func, State#{Key => Func}};
 %% Process is pid or registered name of a process.
 attach(process, Process, Key, #{'_monitors' := M} = State) ->
     Mref = monitor(process, Process),
@@ -1477,7 +1477,7 @@ stop_fsm(#{'_state' := {link, Pid, _}} = Fsm, Reason) ->
         Error ->
             Fsm#{'_state' := {abort}, '_sign' => {abort}, '_reason' => Error}
     end;
-stop_fsm(#{'_state' := {function, Func}} = Fsm, Reason) ->
+stop_fsm(#{'_state' := Func} = Fsm, Reason) when is_function(Func) ->
     {_, _, Fsm1} = Func({xl_fsm_stop, Reason}, Fsm),
     Fsm1;
 stop_fsm(Fsm, _) ->
