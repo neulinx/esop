@@ -1230,7 +1230,7 @@ transfer(Fsm, Indication) ->
     if Step < MaxSteps ->
             transfer_1(Fsm3, Indication);
        true ->
-            transfer_1(Fsm3, exceed_max_steps)
+            transfer_1(Fsm3, {exceed_max_steps})
     end.
 
 %% Phase 1: extract parameters.
@@ -1247,9 +1247,11 @@ transfer_1(Fsm, Indication) when is_map(Indication) ->
                    Fsm#{'_payload' => Payload}
            end,
     transfer_2(Fsm1#{'_sign' => Vector}, Vector, Recovery);
+transfer_1(Fsm, Indication) when is_tuple(Indication) ->
+    transfer_2(Fsm#{'_sign' => Indication}, Indication, undefined);
 transfer_1(Fsm, Indication) ->
     %% treat indication as vector if it is not map.
-    transfer_2(Fsm#{'_sign' => Indication}, Indication, undefined).
+    transfer_2(Fsm#{'_sign' => {Indication}}, {Indication}, undefined).
 
 %% Phase 2: extract next state.
 transfer_2(Fsm, Vector, Recovery) ->
@@ -1260,14 +1262,14 @@ transfer_2(Fsm, Vector, Recovery) ->
         {error, Reason, Fsm1} ->  % undefined or badarg.
             %% You can provide your own exception and stop state.
             Fsm2 = Fsm1#{'_reason' => Reason},
-            case default_sign(Vector) of
-                halt ->
+            case Vector of
+                {halt} ->
                     transfer_3(halt, Fsm2);  % finsh the FSM.
-                stop ->
+                {stop} ->
                     transfer_3(stop, Fsm2);
-                exceed_max_steps ->
+                {exceed_max_steps} ->
                     transfer_3(stop, Fsm2);
-                exception ->
+                {exception} ->
                     %% Try to heal from exceptional state.
                     recover(Fsm2, Recovery);
                 _ ->
@@ -1306,15 +1308,6 @@ make_vector(#{'_sign' := Sign}) ->
 %% Stop is default sign if it is not present.
 make_vector(_) ->
     {stop}.
-
-%% Extract pre-defined sign of transition from vector that are
-%% exception, halt, stop, exceed_max_steps.
-default_sign({Sign}) ->
-    Sign;
-default_sign({_, Sign}) ->
-    Sign;
-default_sign(Sign) ->
-    Sign.
 
 %% DONOT delete the commented code lines because it is feature for
 %% upcoming version.
