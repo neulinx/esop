@@ -118,7 +118,8 @@
              %% Flag of FSM.
              '_state' => active_key() | {'state', state_d()} | tag(),
              %% Flag of state in FSM.
-             '_of_fsm' => 'true' | 'false', % default false.
+             '_is_fsm' => 'true' | 'false',  % state started as FSM.
+             '_of_fsm' => 'true' | 'false', % state is in a FSM.
              %% Wether to submit report to parent process.
              '_report' => 'true' | 'false', % default true.
              %% <<"all">> | <<"default">> | list(),
@@ -255,7 +256,7 @@
 %% - hibernate command: xl_hibernate
 %% - stop command: xl_stop | {xl_stop, reason()}
 %% - FSM stop command: xl_fsm_stop | {xl_fsm_stop, reason()}
-%% - state enter event: xl_enter | {xl_enter, FSM :: pid()}.
+%% - state enter event: xl_enter | {xl_enter, FSM :: pid()}. 
 %% - state transition event: {xl_leave, Pid, state() | {Output, vector()}}
 %% - messages in the gap between states: {xl_intransition, Message}
 %%   ACK: {ok, xl_leave_ack} reply to from Pid.
@@ -352,17 +353,37 @@ handle_cast(Message, State) ->
 -spec handle_info(Info :: term(), state()) ->
                          {'noreply', state()} |
                          {'stop', reason(), state()}.
-handle_info(Message, State) ->
-    case pre_handle(Message) of
-        {xlx, From, _, _} = Info ->
-            Source = From;
-        Info ->
-            Source = noreply
-    end,
-    Result = case handle(Info, State) of
+%% xl_enter means be sent by itself, while {xl_enter, Fsm} is sent by
+%% external FSM process. Initialize FSM and start running (if it is).
+handle_info(xl_enter, State) ->
+    case init_fsm(State) of
+        {ok, Fsm} ->
+            handle_(xl_enter, noreply, Fsm);
+        Stop ->
+            Stop
+    end;
+%% Sugar for stop with normal reason.
+handle_info(xl_stop, State) ->
+    handle_({xl_stop, normal}, noreply, State);
+%% Convert gen_server timeout to xl_sop hibernate.
+handle_info(timeout, State) ->
+    handle_(xl_hibernate, noreply, State);
+%% Sugar for request without path.
+handle_info({xlx, From, Command}, State) ->
+    handle_({xlx, From, [], Command}, From, State);
+%% Sugar for FSM state access.
+handle_info({xlx, From, [<<>> | Path], Command}, State) ->
+    handle_({xlx, From, ['_state' | Path], Command}, From, State);
+handle_info({xlx, From, _, _} = Msg, State) ->
+    handle_(Msg, From, State);
+handle_info(Msg, State) ->
+    handle_(Msg, noreply, State).
+
+handle_(Message, Source, State) ->
+    Result = case handle(Message, State) of
                  {ok, unhandled, State1} ->
 %%%%%%%%%% Defend here? or trust the defence line of gen_server?
-                     default_react(Info, State1);
+                     default_react(Message, State1);
                  Res0 ->
                      Res0
              end,
@@ -948,30 +969,22 @@ init_state(State) ->
                     '_monitors' => Monitors,
                     '_pid' => self(),
                     '_status' => running},
-    Res = enter(State1),
-    prepare(Res, true).
+    case enter(State1) of
+        {ok, State2} ->
+            {ok, prepare(State2)};
+        {ok, State2, Option} ->
+            {ok, prepare(State2), Option};
+        Stop ->
+            Stop
+    end.
 
-prepare({stop, _} = Stop, _) ->
-    Stop;
-prepare({stop, Reason, _}, _) ->
-    {stop, Reason};
-prepare(Ok, false) ->
-    Ok;
-prepare({ok, State}, true) ->
+prepare(State) ->
     %% Initialize id.
     {_, _, S} = activate('_id', State),
     %% Active '_states'.
     {_, _, S1} = activate('_states', S),
     %% load dependent links.
-    S2 = preload(S1),
-    prepare(init_fsm(S2), false);
-prepare({ok, State, Option}, true) ->
-    case prepare({ok, State}, true) of
-        {ok, NewState} ->
-            {ok, NewState, Option};
-        Stop ->
-            Stop
-    end.
+    preload(S1).
 
 %% Return of '_entry' function is compatible with
 %% gen_server:init/1. '_exit' action will not be called if init
@@ -1023,15 +1036,16 @@ init_fsm(Fsm) ->
             {_, _, Fsm2} = activate('_traces', Fsm1),
             %% Initialize payload as FSM input.
             {_, _, Fsm3} = activate('_payload', Fsm2),
+            Fsm4 = Fsm3#{'_is_fsm' => true},
             case Type of
                 data ->
-                    transfer(Fsm3, Data);
+                    transfer(Fsm4, Data);
                 _ ->
-                    case start_fsm(Type, Data, Fsm3) of
-                        {ok, done, Fsm4} ->
-                            {ok, Fsm4};
-                        {Code, Result, Fsm4} ->
-                            {stop, {Code, Result}, Fsm4}
+                    case start_fsm(Type, Data, Fsm4) of
+                        {ok, _} = Ok ->
+                            Ok;
+                        {Code, Result, Fsm5} ->
+                            {stop, {shutdown, {Code, Result}}, Fsm5}
                     end
             end
     end.
@@ -1040,21 +1054,6 @@ init_fsm(Fsm) ->
 %% Handling messages by relay to react function and default
 %% procedure. 
 %% --------------------------------------------------------------------
-%% Sugar for stop.
-pre_handle(xl_stop) ->
-    {xl_stop, normal};
-%% gen_server timeout as hibernate command.
-pre_handle(timeout) ->
-    xl_hibernate;
-%% Empty path, the last hop.
-pre_handle({xlx, From, Command}) ->
-    {xlx, From, [], Command};
-%% Sugar for fsm state access
-pre_handle({xlx, From, [<<>> | Path], Command}) ->
-    {xlx, From, ['_state' | Path], Command};
-pre_handle(Msg) ->
-    Msg.
-
 %% Notice: if there is no '_react' action or '_react' action do not
 %% process this message, should return {ok, unhandled, State} to
 %% handle it by default routine. Otherwise, the message will be
@@ -1278,8 +1277,8 @@ transfer_2(Fsm, Vector, Recovery) ->
         {Type, Data, Fsm1} ->  % enter new state.
             %% Accept only data of map type as state, process or function.
             case start_fsm(Type, Data, Fsm1) of
-                {ok, done, Fsm2} ->
-                    {ok, Fsm2};
+                {ok, _} = Ok->
+                    Ok;
                 {Sign, Reason, Fsm2} ->
                     Fsm3 = Fsm2#{'_reason' => {Sign, Reason}},
                     transfer_2(Fsm3, {exception}, Recovery)
@@ -1332,22 +1331,27 @@ fsm_start(data, D, Q, F) ->
     State = D#{'_payload' => Input, '_report' => true, '_of_fsm' => true},
     {process, Pid, F1} = attach(state, State, '_state', F),
     [Pid ! Message || Message <- Q],
-    {ok, done, F1};
+    {ok, F1};
 fsm_start(T, D, Q, F) ->
     case attach(T, D, '_state', F) of
         {process, Pid, F1} ->
             %% External process should request payload to FSM, beware
             %% of deadlock.
             case request(Pid, xl_enter, F1) of
-                {ok, done, _} = Done->
+                {ok, done, F2} ->
                     [Pid ! Message || Message <- Q],
-                    Done;
+                    {ok, F2};
                 Error ->
                     Error
             end;
         {function, Func, F1} ->
             %% Payload and message queue are in F1.
-            Func({xlx, noreply, [], xl_enter}, F1);
+            case Func({xlx, noreply, [], xl_enter}, F1) of
+                {ok, done, F2} ->
+                    {ok, F2};
+                Error ->
+                    Error
+            end;
         %% refer or redirect.
         {data, Data, F1} ->
             fsm_start(data, Data, Q, F1);

@@ -69,8 +69,11 @@ coverage() ->
     {ok, 2} = xl:call([P6, b], get),
     {stopped, normal} = xl:stop(P6),
 
-    {error, normal} = xl:start(#{'_state' => stop}),
-    {error, normal} = xl:start(#{'_entry' => F2, '_state' => stop}),
+    %%~~ init_state()
+    {ok, P6_1} = xl:start(#{'_state' => stop}),
+    {stopped, noproc} = xl:stop(P6_1),
+    {ok, P6_2} = xl:start(#{'_entry' => F2, '_state' => stop}),
+    {stopped, noproc} = xl:stop(P6_2),
     
     F3 = fun(S) -> {stop, normal, S} end,
     {error, normal} = xl:start(#{'_entry' => F3}),
@@ -93,7 +96,9 @@ coverage() ->
     M2 = #{'_states' => {state, #{}},
            '_recovery' => undefined,
            '_state' => {data, #{'_sign' => start}}},
-    {error,{shutdown,exception}} = xl:start(M2),
+    {ok, P8_1} = xl:start(M2),
+    {stopped, {shutdown,exception}} = xl:stop(P8_1),
+
 
     {ok, P9} = xl:start(#{}),
     {ok, R3} = xl:call(P9, {subscribe, self()}),
@@ -537,7 +542,8 @@ coverage() ->
     {ok, 2} = xl:call([P52, <<>>, b], get),
     {ok, done} = xl:call([P52, <<>>], xl_stop),
     {stopped, {_, exception}} = xl:stop(P52),
-    {error, {error, badarg}} = xl:start(#{'_state' => {redirect, [unknown]}}),
+    {ok, P52_1} = xl:start(#{'_state' => {redirect, [unknown]}}),
+    {stopped, noproc} = xl:stop(P52_1),
     
     %%~~ start_fsm(), transfer_2()
     L53 = #{{a} => #{'_sign' => b},
@@ -601,7 +607,13 @@ coverage() ->
     receive
         {R56, {exit, #{'_sign' := {stop}}}} ->
             stop
-    end.
+    end,
+    
+    %%~~ fsm_start()
+    F57 = fun(_, S) -> {ok, unhandled, S} end,
+    S57 = #{'_state' => F57},
+    {ok, P57} = xl:start(S57),
+    {stopped, noproc} = xl:stop(P57).
 
 isolate() ->
     ignore_coverage.

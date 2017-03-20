@@ -90,7 +90,7 @@ test2() ->
     xl:cast(Pid, {unsubscribe, Ref}),
     xl:notify(Pid, test),
     timeout = receive
-                  _ ->
+                  {Ref, _} ->
                       ignore_coverage
               after
                   10 ->
