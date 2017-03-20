@@ -230,7 +230,8 @@ coverage() ->
     {ok, done} = xl:call([P19, <<>>], xl_stop),
     {ok, failover} = xl:call([P19, '_status'], get),
     {ok, 1} = xl:call([P19, '_retry_count'], get),
-    {ok, 2} = xl:call([P19, '_step'], get),
+    timer:sleep(1),
+    {ok, 3} = xl:call([P19, '_step'], get),
     {ok, done} = xl:call([P19, <<>>], xl_stop),
     {ok, 2} = xl:call([P19, '_retry_count'], get),
     {ok, running} = xl:call([P19, <<>>, '_status'], get),
@@ -525,9 +526,19 @@ coverage() ->
     {stopped, normal} = xl:stop(P50),
     {stopped, normal} = xl:stop(P51),
 
-    %%~~ init_fsm()
-    S52 = #{a => #{b => 1}, '_state' => {redirect, [a]}},
-    {error, {error, badarg}} = xl:start(S52),
+    %%~~ init_fsm(), fsm_start()
+    S52 = #{a => #{b => 1, '_sign' => c},
+            d => #{b => 2, '_sign' => e},
+            '_states' => #{{c} => {refer, [d]}, {e} => {test, unknown}},
+            '_state' => {redirect, [a]}},
+    {ok, P52} = xl:start(S52),
+    {ok, 1} = xl:call([P52, <<>>, b], get),
+    {ok, done} = xl:call([P52, <<>>], xl_stop),
+    {ok, 2} = xl:call([P52, <<>>, b], get),
+    {ok, done} = xl:call([P52, <<>>], xl_stop),
+    {stopped, {_, exception}} = xl:stop(P52),
+    {error, {error, badarg}} = xl:start(#{'_state' => {redirect, [unknown]}}),
+    
     %%~~ start_fsm(), transfer_2()
     L53 = #{{a} => #{'_sign' => b},
             {b} => 1,

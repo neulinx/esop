@@ -1348,7 +1348,15 @@ fsm_start(T, D, Q, F) ->
         {function, Func, F1} ->
             %% Payload and message queue are in F1.
             Func({xlx, noreply, [], xl_enter}, F1);
-        {_, _, F1} ->  % don't support proxy and other type data.
+        %% refer or redirect.
+        {data, Data, F1} ->
+            fsm_start(data, Data, Q, F1);
+        %% redirect.
+        {proxy, Target, F1} ->
+            {Code, Result, F2} = request(Target, touch, F1),
+            fsm_start(Code, Result, Q, F2);
+        %% unknown type.
+        {_, _, F1} ->
             {error, badarg, F1}
     end.
 
