@@ -78,8 +78,8 @@ coverage() ->
     F3 = fun(S) -> {stop, normal, S} end,
     {error, normal} = xl:start(#{'_entry' => F3}),
 
-    {error, {{preload_failure, undefined}, _}} =
-        xl:start(#{'_preload' => [a]}),
+    {ok, P6_3} = xl:start(#{'_preload' => [a]}),
+    {stopped, noproc} = xl:stop(P6_3),
 
     {ok, P7} = xl:start(#{'_react' => fun react/2}),
     {ok, #{'_pid' := P7, '_status' := running}} = xl:call(P7, get_raw),

@@ -353,10 +353,13 @@ handle_cast(Message, State) ->
 -spec handle_info(Info :: term(), state()) ->
                          {'noreply', state()} |
                          {'stop', reason(), state()}.
-%% xl_enter means be sent by itself, while {xl_enter, Fsm} is sent by
-%% external FSM process. Initialize FSM and start running (if it is).
+%% xl_enter means be sent by itself. Initialize FSM and start running
+%% (if it is).
+%% The order of initialization is: [initialize runtime attributes] ->
+%% [preload depended actors] -> [if it is FSM, start it].
 handle_info(xl_enter, State) ->
-    case init_fsm(State) of
+    State1 = prepare(State),
+    case init_fsm(State1) of
         {ok, Fsm} ->
             handle_(xl_enter, noreply, Fsm);
         Stop ->
@@ -946,10 +949,8 @@ attach(Type, Data, _Key, State) ->
 
 %% --------------------------------------------------------------------
 %% gen_server callbacks. Initializes the server with state action
-%% entry. The order of initialization is: [initialize runtime
-%% attributes] -> [call '_entry' action] -> [preload depended actors]
-%% -> [if it is FSM, start it]. The '_entry' action may affect
-%% follow-up steps. Callback init/1 is a synchronous operation, _entry
+%% entry. The '_entry' action may affect follow-up steps fired by
+%% xl_enter event. Callback init/1 is a synchronous operation, _entry
 %% function must return as soon as possible. Time-costed operations
 %% and waitting for parent must place in _react function when xl_enter
 %% event raised.
@@ -969,22 +970,7 @@ init_state(State) ->
                     '_monitors' => Monitors,
                     '_pid' => self(),
                     '_status' => running},
-    case enter(State1) of
-        {ok, State2} ->
-            {ok, prepare(State2)};
-        {ok, State2, Option} ->
-            {ok, prepare(State2), Option};
-        Stop ->
-            Stop
-    end.
-
-prepare(State) ->
-    %% Initialize id.
-    {_, _, S} = activate('_id', State),
-    %% Active '_states'.
-    {_, _, S1} = activate('_states', S),
-    %% load dependent links.
-    preload(S1).
+    enter(State1).
 
 %% Return of '_entry' function is compatible with
 %% gen_server:init/1. '_exit' action will not be called if init
@@ -1000,6 +986,27 @@ enter(#{'_entry' := Entry} = State) ->
 enter(State) ->
     {ok, State}.
 
+%% --------------------------------------------------------------------
+%% Prepare runtime environment and launch FSM.
+%% 
+%% Flag of FSM is existence of the attribute named _state. _state may
+%% be pre-spawned external process as an introducer, function share
+%% same process with the fsm actor, or data map with '_sign' '_payload'
+%% '_recovery' keys. '_payload' key name is compatible with transfer
+%% function, actually means input of next state.
+%% 
+%% undefined _recovery of start state use '_recovery' of the FSM as
+%% default. To support recovery strategy of restart, '_state' and/or
+%% '_payload' should reside in '_states' as initial values.
+%% --------------------------------------------------------------------
+prepare(State) ->
+    %% Initialize id.
+    {_, _, S} = activate('_id', State),
+    %% Active '_states'.
+    {_, _, S1} = activate('_states', S),
+    %% load dependent links.
+    preload(S1).
+
 %% fail-fast of pre-load actors.
 preload(#{'_preload' := Preload} = State) ->
     Activate = fun(Key, S) ->
@@ -1014,19 +1021,6 @@ preload(#{'_preload' := Preload} = State) ->
 preload(State) ->
     State.
 
-%% --------------------------------------------------------------------
-%% Initialize and launch FSM.
-%% 
-%% Flag of FSM is existence of the attribute named _state. _state may
-%% be pre-spawned external process as an introducer, function share
-%% same process with the fsm actor, or data map with '_sign' '_payload'
-%% '_recovery' keys. '_payload' key name is compatible with transfer
-%% function, actually means input of next state.
-%% 
-%% undefined _recovery of start state use '_recovery' of the FSM as
-%% default. To support recovery strategy of restart, '_state' and/or
-%% '_payload' should reside in '_states' as initial values.
-%% --------------------------------------------------------------------
 init_fsm(Fsm) ->
     case activate('_state', Fsm) of
         {error, undefined, Fsm1} ->  % not FSM.
