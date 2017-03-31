@@ -207,8 +207,9 @@
 
 %%%% Messages and results.
 -type request() :: {'xlx', from(), Command :: term()} |
-                   {'xlx', from(), Path :: list(), Command :: term()}.
--type notification() :: {'xlx', Notification :: term()}.
+                   {'xlx', from(), path(), Command :: term()}.
+-type notification() :: {'xlx', Notification :: term()} | 
+                        {'xlx', 'noreply', path(), Notification :: term()}.
 -type message() :: request() | notification() | term().
 -type code() :: 'ok' | 'error' | 'noreply' | 'stopped' |
                 'data' | 'process' | 'function' | tag().  % etc.
@@ -1551,7 +1552,7 @@ report(Supervisor, Report, #{'_of_fsm' := true} = State) ->
     flush_and_relay(Supervisor),
     State;
 report(Supervisor, Report, State) ->
-    Supervisor ! {xl_leave, undefined, Report},
+    Supervisor ! {xl_leave, noreply, Report},
     State.
 
 %% Selective report.
