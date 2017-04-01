@@ -137,7 +137,6 @@
              '_recovery' => recovery(),
              '_link_recovery' => binary(),  % default is <<"restart">>.
              '_id' => tag(),
-             '_start' => map(),  % #{<<"input">>, <<"sign">>},
              '_max_steps' => limit(),
              '_preload' => list(),
              '_timeout' => timeout(), 
