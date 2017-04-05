@@ -1358,10 +1358,7 @@ fsm_start(T, D, Q, F) ->
         %% redirect.
         {proxy, Target, F1} ->
             {Code, Result, F2} = request(Target, touch, F1),
-            fsm_start(Code, Result, Q, F2);
-        %% unknown type.
-        {_, _, F1} ->
-            {error, badarg, F1}
+            fsm_start(Code, Result, Q, F2)
     end.
 
 %% --------------------------------------------------------------------
