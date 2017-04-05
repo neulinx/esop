@@ -256,19 +256,19 @@ coverage() ->
             ok
     end,
 
-    F21 = fun(#{'_parent' := Fsm, '_payload' := 1} = State) ->
+    F21 = fun(#{'_parent' := {_, Fsm}, '_payload' := 1} = State) ->
                   Fsm ! {xl_leave, undefined,
                          #{'_payload' => 2, '_sign' => start}},
                   State#{'_report' := false};
-             (#{'_parent' := Fsm, '_payload' := 2} = State) ->
+             (#{'_parent' := {_, Fsm}, '_payload' := 2} = State) ->
                   Fsm ! {xl_leave, undefined,
                          #{'_payload' => 3, '_sign' => exception}},
                   State#{'_report' := false};
-             (#{'_parent' := Fsm, '_payload' := 3} = State) ->
+             (#{'_parent' := {_, Fsm}, '_payload' := 3} = State) ->
                   Fsm ! {xl_leave, undefined,
                          #{'_payload' => 4, '_sign' => exception}},
                   State#{'_report' := false};
-             (#{'_parent' := Fsm, '_payload' := 4} = State) ->
+             (#{'_parent' := {_, Fsm}, '_payload' := 4} = State) ->
                   Fsm ! {xl_leave, undefined, #{'_sign' => {exception}}},
                   State#{'_report' := false}
           end,
@@ -281,6 +281,7 @@ coverage() ->
     {ok, done} = xl:call([P21, <<>>], xl_stop),
     {ok, 2} = xl:call([P21, <<>>, '_payload'], get),
     {ok, done} = xl:call([P21, <<>>], xl_stop),
+    timer:sleep(1),
     {ok, 1} = xl:call([P21, '_retry_count'], get),
     {ok, done} = xl:call([P21, <<>>], xl_stop),
     {ok, 2} = xl:call([P21, '_retry_count'], get),
@@ -325,11 +326,11 @@ coverage() ->
     {ok, P27} = xl:start(M27),
     {stopped, _} = xl:stop(P27),
 
-    S28 = #{'_parent' => P27, '_report' => true},
+    S28 = #{'_parent' => {link, P27, undefined}, '_report' => true},
     {ok, P28} = xl:start(S28),
     {stopped, normal} = xl:stop(P28),
 
-    S29 = #{'_parent' => self(),
+    S29 = #{'_parent' => {process, self()},
             '_report_items' => <<"all">>,
             '_report' => true},
     {ok, P29} = xl:start(S29),
@@ -420,7 +421,8 @@ coverage() ->
     {ok, #{2 := a}} = xl:call(P40, get),
     {stopped, normal} = xl:stop(P40),
 
-    S41 = #{'_parent' => self(), '_report_items' => false, '_report' => true},
+    S41 = #{'_parent' => {process, self()},
+            '_report_items' => false, '_report' => true},
     {ok, P41} = xl:start(S41),
     {ok, #{}} = xl:stop(P41),
     S42 = S41#{'_report_items' := []},
@@ -445,15 +447,23 @@ coverage() ->
     {error, timeout} = xl:call([P44, a], dd),
     {stopped, normal} = xl:stop(P44),
     
+    %%~~ default_react(), _bond
     {ok, P45} = xl:start(#{}),
-    F46 = fun(xl_enter, #{'_parent' := Parent} = S) ->
+    F46 = fun(xl_enter, #{'_parent' := {process, Parent}} = S) ->
+                  link(Parent),
+                  {ok, S};
+             (xl_enter, #{'_parent' := {link, Parent, _}} = S) ->
                   link(Parent),
                   {ok, S};
              ({xlx, _, _, {bind, Pid}}, S) ->
                   link(Pid),
-                  {ok, done, S#{'_parent' => Pid, '_bond' => normal}}
+                  {ok, done, S#{'_parent' => {link, Pid, undefined}}};
+             ({xlx, _, _, {bind, normal, Pid}}, S) ->
+                  link(Pid),
+                  {ok, done,
+                   S#{'_parent' => {process, Pid}, '_bond' => normal}}
           end,
-    {ok, P46} = xl:start(#{'_parent' => P45,
+    {ok, P46} = xl:start(#{'_parent' => {process, P45},
                            '_react' => F46,
                            '_bond' => standalone}),
     {ok, R46} = xl:call(P46, {subscribe, self()}),
@@ -469,7 +479,26 @@ coverage() ->
     {ok, done} = xl:call(P46, {bind, P47}, 10),
     {stopped, normal} = xl:stop(P47),
     receive
+        {R46, _} ->
+            ignore_coverage
+    after
+        10 ->
+            continue
+    end,
+    {ok, P471} = xl:start(#{}),
+    {ok, done} = xl:call(P46, {bind, normal, P471}, 10),
+    {stopped, normal} = xl:stop(P471),
+    receive
         {R46, {exit, _}} ->
+            reach_here
+    end,
+    {ok, P472} = xl:start(#{}),
+    {ok, P461} = xl:start(#{'_parent' => {link, P472, undefined},
+                           '_react' => F46, '_bond' => normal}),
+    {ok, R461} = xl:call(P461, {subscribe, self()}),
+    {stopped, normal} = xl:stop(P472),
+    receive
+        {R461, {exit, _}} ->
             reach_here
     end,
 
@@ -541,7 +570,8 @@ coverage() ->
     {ok, done} = xl:call([P52, <<>>], xl_stop),
     {ok, 2} = xl:call([P52, <<>>, b], get),
     {ok, done} = xl:call([P52, <<>>], xl_stop),
-    {stopped, {_, exception}} = xl:stop(P52),
+    timer:sleep(1),
+    {stopped, noproc} = xl:stop(P52),
     {ok, P52_1} = xl:start(#{'_state' => {redirect, [unknown]}}),
     {stopped, noproc} = xl:stop(P52_1),
     
