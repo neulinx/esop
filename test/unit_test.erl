@@ -145,7 +145,7 @@ test_path(Pid) ->
 %% a1.a2.a3.key = 123
 %%-------------------------------------------------------------------
 test4() ->
-    Entry = fun(#{'_parent' := P} = S) ->
+    Entry = fun(#{'_parent' := {process, P}} = S) ->
                     {ok, done, S1} = xl:request([reg], {put, {process, P}}, S),
                     {ok, S1}
             end,

@@ -104,7 +104,7 @@
              '_exit' => exit(),
              '_behaviors' => behaviors(),
              '_pid' => pid(),
-             '_parent' => pid(),
+             '_parent' => process_key(),
              '_surname' => tag(), % Attribute name in the parent state.
              '_reason' => reason(),
              '_status' => status(),
@@ -116,7 +116,7 @@
              '_monitors' => monitors(),
              '_bond' => 'standalone' | tag(),  % how to deal with EXIT event.
              %% Flag of FSM.
-             '_state' => active_key() | {'state', state_d()} | tag(),
+             '_state' => attribute(),
              %% Flag of state in FSM.
              '_is_fsm' => 'true' | 'false',  % state started as FSM.
              '_of_fsm' => 'true' | 'false', % state is in a FSM.
@@ -175,11 +175,12 @@
 %%%% attributes
 %% There is no atomic or string type in raw data. Such strings are
 %% all binary type as <<"AtomOrString">>.
--type active_key() :: {'link', process(), identifier()} |
-                      state_function() |
-                      {'proxy', target()}.
--type attribute() :: {'link', process(), identifier()} |
-                     state_function() |
+-type process_key() :: {'process', process()} |
+                       {'link', process(), identifier()}.
+-type function_key() :: state_function().
+-type proxy_key() :: {'proxy', target()}.
+-type active_key() :: process_key() | function_key() | proxy_key().
+-type attribute() :: active_key() |
                      {'state', state_d()} |
                      refers() |
                      term().
@@ -911,7 +912,7 @@ activate(_Unknown, _Key, _Value, State) ->
 %% Todo: Every state may have own recovery settings. Recovery may be
 %% the initial state data for fast rollback.
 activate_(Key, Value, #{'_monitors' := M} = State) ->
-    Start = Value#{'_parent' => self(), '_surname' => Key},
+    Start = Value#{'_parent' => {process, self()}, '_surname' => Key},
     {ok, Pid} = start_link(Start),
     Recovery = maps:get('_recovery', Start, undefined),
     Monitors = M#{Pid => {Key, Recovery}},
@@ -1119,10 +1120,15 @@ default_react({'DOWN', M, _, _, _} = Down, State) ->
 %% generate 'EXIT' message on quitting. If '_parent' process crashed
 %% and bond type is not standalone, current actor should exit
 %% too. Strategy of actor to handle unknown 'EXIT' is to ignore it.
-default_react({'EXIT', Pid, _} = Exit,
-              #{'_parent' := Pid, '_bond' := standalone} = State) ->
+default_react({'EXIT', Pid, _} = Exit, #{'_parent' := {process, Pid},
+                                         '_bond' := standalone} = State) ->
     handle_halt(Pid, Exit, State);
-default_react({'EXIT', Pid, _}, #{'_parent' := Pid} = State) ->
+default_react({'EXIT', Pid, _} = Exit, #{'_parent' := {link, Pid, _},
+                                         '_bond' := standalone} = State) ->
+    handle_halt(Pid, Exit, State);
+default_react({'EXIT', Pid, _}, #{'_parent' := {process, Pid}} = State) ->
+    {stop, {shutdown, break}, State};
+default_react({'EXIT', Pid, _}, #{'_parent' := {link, Pid, _}} = State) ->
     {stop, {shutdown, break}, State};
 default_react({'EXIT', Pid, _} = Exit, State) ->
     handle_halt(Pid, Exit, State);
@@ -1524,9 +1530,15 @@ goodbye2(State) ->
 
 %% Goodbye supervisor! And submit leave report on-demanded.
 goodbye3(#{'_parent' := Supervisor, '_report' := true} = State, Report) ->
-    case is_process_alive(Supervisor) of
+    case Supervisor of
+        {process, Pid} ->
+            Pid;
+        {link, Pid, _} ->
+            Pid
+    end,
+    case is_process_alive(Pid) of
         true ->
-            report(Supervisor, Report, State);
+            report(Pid, Report, State);
         false ->
             State
     end;
