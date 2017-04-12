@@ -574,20 +574,17 @@ stop(Process, Reason) ->
 
 -spec stop(process(), reason(), timeout()) -> output().
 stop(Process, normal, Timeout) ->
-    Process ! {xl_stop, normal},
-    wait_stop(Process, Timeout);
+    wait_stop(Process, {xl_stop, normal}, Timeout);
 stop(Process, shutdown, Timeout) ->
-    Process ! {xl_stop, shutdown},
-    wait_stop(Process, Timeout);
+    wait_stop(Process, {xl_stop, shutdown}, Timeout);
 stop(Process, {shutdown, _} = Reason, Timeout) ->
-    Process ! {xl_stop, Reason},
-    wait_stop(Process, Timeout);
+    wait_stop(Process, {xl_stop, Reason}, Timeout);
 stop(Process, Reason, Timeout) ->
-    Process ! {xl_stop, {shutdown, Reason}},
-    wait_stop(Process, Timeout).
+    wait_stop(Process, {xl_stop, {shutdown, Reason}}, Timeout).
 
-wait_stop(Process, Timeout) ->
+wait_stop(Process, StopSignal, Timeout) ->
     Mref = monitor(process, Process),
+    Process ! StopSignal,
     receive
         {xl_leave, From, Result} when is_pid(From) ->
             catch From ! {ok, xl_leave_ack},
@@ -1468,9 +1465,8 @@ ensure_sign(State) ->
 %% Internal state process, is exclusive used by one FSM.  External
 %% state process or function shared same process with FSM.
 stop_fsm(#{'_state' := {link, Pid, _}} = Fsm, Reason) ->
-    Pid ! {xl_fsm_stop, Reason},
     Timeout = maps:get('_timeout', Fsm, ?DFL_TIMEOUT),
-    case wait_stop(Pid, Timeout) of
+    case wait_stop(Pid, {xl_fsm_stop, Reason}, Timeout) of
         {ok, Result} ->  % result must be map format.
             accept_output(Result, Fsm);
         {stopped, Result} ->
@@ -1527,11 +1523,11 @@ goodbye2(State) ->
 
 %% Goodbye supervisor! And submit leave report on-demanded.
 goodbye3(#{'_parent' := Supervisor, '_report' := true} = State, Report) ->
-    case Supervisor of
-        {process, Pid} ->
-            Pid;
-        {link, Pid, _} ->
-            Pid
+    Pid = case Supervisor of
+        {process, P} ->
+            P;
+        {link, P, _} ->
+            P
     end,
     case is_process_alive(Pid) of
         true ->
