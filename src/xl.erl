@@ -150,7 +150,8 @@
 %%%% Definition of gen_server.
 -type server_name() :: {local, atom()} |
                        {global, atom()} |
-                       {via, atom(), term()}.
+                       {via, atom(), term()} |
+                       'undefined'.
 -type start_ret() ::  {'ok', pid()} | 'ignore' | {'error', term()}.
 -type start_opt() :: {'timeout', Time :: timeout()} |
                      {'spawn_opt', [proc_lib:spawn_option()]}.
