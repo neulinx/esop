@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 19 Oct 2016 by HaiGuiqing <gary@XL59.com>
 %%%-------------------------------------------------------------------
--module(unit_test).
+-module(xl_unit_test).
 
 -compile({no_auto_import,[exit/1]}).
 
@@ -26,7 +26,7 @@ unit_test_() ->
             {"Data traversal", fun test3/0},
             {"Basic access and subscribe", fun test2/0},
             {"State behaviors", fun test1/0},
-            {"Full coverage test.", fun coverage_test:coverage/0}],
+            {"Full coverage test.", fun xl_coverage_test:coverage/0}],
     %% {timeout, 2, [fun test5/0]}.
     %% {timeout, 2, [fun coverage_test:isolate/0]}.
     {timeout, 2, Test}.

@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 25 Dec 2016 by HaiGuiqing <gary@XL59.com>
 %%%-------------------------------------------------------------------
--module(coverage_test).
+-module(xl_coverage_test).
 
 -export([create/1, coverage/0, isolate/0]).
 
