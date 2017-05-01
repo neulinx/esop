@@ -556,7 +556,6 @@ coverage() ->
     {ok, 7} = xl:call([P50, b, e], get),
     %% ?debugVal(xl:call(P51, get_raw)),
     %% ?debugVal(xl:call(P50, get_raw)),
-    {process, P50} = xl:call(P51, P50, touch, 10),
     {stopped, normal} = xl:stop(P50),
     {stopped, normal} = xl:stop(P51),
 
