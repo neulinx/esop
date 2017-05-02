@@ -51,19 +51,13 @@ exit(#{'_payload' := Input} = S) ->
 exit(State) ->
     State#{'_payload' => "Done"}.
 
-subscribe(P) ->
-    subscribe(P, self()).
-
-subscribe(P, Pid) ->
-    xl:call(P, {subscribe, Pid}).
-
 test1() ->
     S = #{test => 3},
     S1 = xl:create(?MODULE, S),
     {ok, A} = xl:start(S1),
     {ok, world} = gen_server:call(A, hello),
-    {ok, 3} = xl:call([A, test], get),
-    {ok, Ref} = subscribe(A),
+    {ok, 3} = xl:get([A, test]),
+    {ok, Ref} = xl:subscribe(A),
     {stopped, {shutdown, please}} = xl:stop(A, please),
     {exit, #{'_payload' := "Done"}} = receive
                                          {Ref, Notify} ->
@@ -75,13 +69,13 @@ test1() ->
 %%-------------------------------------------------------------------
 test2() ->
     {ok, Pid} = xl:start(#{'_payload' => hello}),
-    {ok, running} = xl:call([Pid, '_status'], get),
-    {ok, Pid} = xl:call([Pid, '_pid'], get),
-    {ok, done} = xl:call([Pid, "a"], {put, a}),
-    {ok, a} = xl:call([Pid, "a"], get),
-    {ok, done} = xl:call([Pid, "a"], delete),
-    {error, undefined} = xl:call([Pid, "a"], get),
-    {ok, Ref} = subscribe(Pid),
+    {ok, running} = xl:get([Pid, '_status']),
+    {ok, Pid} = xl:get([Pid, '_pid']),
+    {ok, done} = xl:put([Pid, "a"], a),
+    {ok, a} = xl:get([Pid, "a"]),
+    {ok, done} = xl:delete([Pid, "a"]),
+    {error, undefined} = xl:get([Pid, "a"]),
+    {ok, Ref} = xl:subscribe(Pid),
     xl:notify(Pid, test),
     test = receive
                {Ref, Info} ->
@@ -96,15 +90,15 @@ test2() ->
                   10 ->
                       timeout
               end,
-    {ok, Ref1} = subscribe(Pid),
-    {ok, done} = xl:call(Pid, {unsubscribe, Ref1}),
+    {ok, Ref1} = xl:subscribe(Pid),
+    {ok, done} = xl:unsubscribe(Pid, Ref1),
     {ok, Subscriber} = xl:start(#{}),
-    {ok, Ref2} = subscribe(Pid, Subscriber),
-    {ok, Subs} = xl:call([Pid, '_subscribers'], get),
+    {ok, Ref2} = xl:subscribe(Pid, Subscriber),
+    {ok, Subs} = xl:get([Pid, '_subscribers']),
     Subscriber = maps:get(Ref2, Subs),
     {stopped, normal} = xl:stop(Subscriber),
-    {ok, #{}} = xl:call([Pid, '_subscribers'], get),
-    {ok, Ref3} = subscribe(Pid),
+    {ok, #{}} = xl:get([Pid, '_subscribers']),
+    {ok, Ref3} = xl:subscribe(Pid),
     {stopped, normal} = xl:stop(Pid),
     {exit, #{'_payload' := hello}} = receive
                                         {Ref3, Notify} ->
@@ -126,19 +120,19 @@ test3() ->
 
 test_path(Pid) ->
     {ok, 123} = xl:call([Pid, "a1", "a2", "a3", "key"], get, 10),
-    {ok, #{"key" := 123}} = xl:call([Pid, "a1", "a2", "a3"], get),
-    {ok, done} = xl:call([Pid, "a1", "a2", "a3", "key"], {put, 456}),
-    {ok, 456} = xl:call([Pid, "a1", "a2", "a3", "key"], get),
-    {ok, done} = xl:call([Pid, "a1", "a2", "key2"], {put, 789}),
-    {ok, 789} = xl:call([Pid, "a1", "a2", "key2"], get),
-    {ok, done} = xl:call([Pid, "a1", "a2", "key2"], delete),
-    {error, undefined} = xl:call([Pid, "a1", "a2", "key2"], get),
-    {ok, done} = xl:call([Pid, "b1"], {put, b1}),
-    {ok, b1} = xl:call([Pid, "b1"], get),
-    {ok, done} = xl:call([Pid, "b1"], delete),
-    {error, undefined} = xl:call([Pid, "a1", "x2", "key2"], get),    
+    {ok, #{"key" := 123}} = xl:get([Pid, "a1", "a2", "a3"]),
+    {ok, done} = xl:put([Pid, "a1", "a2", "a3", "key"], 456),
+    {ok, 456} = xl:get([Pid, "a1", "a2", "a3", "key"]),
+    {ok, done} = xl:put([Pid, "a1", "a2", "key2"], 789),
+    {ok, 789} = xl:get([Pid, "a1", "a2", "key2"]),
+    {ok, done} = xl:delete([Pid, "a1", "a2", "key2"]),
+    {error, undefined} = xl:get([Pid, "a1", "a2", "key2"]),
+    {ok, done} = xl:put([Pid, "b1"], b1),
+    {ok, b1} = xl:get([Pid, "b1"]),
+    {ok, done} = xl:delete([Pid, "b1"]),
+    {error, undefined} = xl:get([Pid, "a1", "x2", "key2"]),    
     {error, unknown} = xl:call([Pid, "a1", "a2"], other),
-    {error, undefined} = xl:call([Pid, "b1"], get).
+    {error, undefined} = xl:get([Pid, "b1"]).
 
 %%-------------------------------------------------------------------
 %% Hierarchical Data traversal, active attribute version.
@@ -171,11 +165,11 @@ test4() ->
     Realm = #{name => realm, '_states' => Links},
     {ok, R} = xl:start({local, realm}, Realm, []),
     test_path(R),
-    {ok, done} = xl:call([R, 2], {put, {function, F}}),
+    {ok, done} = xl:put([R, 2], {function, F}),
     {ok, {raw, realm}} = xl:call([R, f], {get, name}),
     {ok, {raw, realm}} = xl:call([R, 2], {get, name}),
-    {ok, done} = xl:call([R, 2], delete),
-    {ok, M1} = subscribe([R, "a1", "a2", "a3"]),
+    {ok, done} = xl:delete([R, 2]),
+    {ok, M1} = xl:subscribe([R, "a1", "a2", "a3"]),
     {stopped, normal} = xl:stop(R),
     {exit, #{'_payload' := a3_test}} = receive
                                           {M1, Notify} ->
@@ -221,7 +215,7 @@ test5() ->
                      {ok, unhandled, S}
              end,
     Exit4 = fun(#{fsm := Pid} = S) ->
-                    {ok, Payload} = xl:call([Pid, '_payload'], get),
+                    {ok, Payload} = xl:get([Pid, '_payload']),
                     xl:report(Pid, S#{'_payload' => Payload + 1})
             end,
     Behaviors = #{'_react' => React4, '_exit' => Exit4},
@@ -256,21 +250,21 @@ test5() ->
                                  
 test5(Fsm) ->
     {ok, F} = xl:start(Fsm),
-    {ok, Ref} = subscribe(F),
-    {ok, t1} = xl:call([F, <<>>, '_id'], get),
-    {ok, fsm} = xl:call([F, '_id'], get),
+    {ok, Ref} = xl:subscribe(F),
+    {ok, t1} = xl:get([F, <<>>, '_id']),
+    {ok, fsm} = xl:get([F, '_id']),
     {ok, done} = xl:call([F, <<>>], xl_stop),
     receive
         {Ref, {transition, #{'_payload' := 1}}} -> 
             gotit
     end,
-    {ok, t2} = xl:call([F, '_state', '_id'], get),
+    {ok, t2} = xl:get([F, '_state', '_id']),
     {ok, done} = xl:call([F, <<>>], xl_stop),
     receive
         {Ref, {transition, #{'_payload' := 2}}} -> 
             gotit
     end,
-    {ok, t3} = xl:call([F, <<>>, '_id'], get),
+    {ok, t3} = xl:get([F, <<>>, '_id']),
     {ok, done} = xl:call([F, <<>>], xl_stop),
     receive
         {Ref, {exit, #{'_payload' := 3}}} -> 
@@ -288,28 +282,28 @@ test6() ->
     Actor = #{name => actor, '_states' => Links},
     {ok, Pid} = xl:start(Actor),
     %% ==== default recovery mode, heal on-demand.
-    {ok, actor} = xl:call([Pid, name], get),
-    {ok, a} = xl:call([Pid, a, name], get),
-    {ok, Ref} = subscribe([Pid, a]),
+    {ok, actor} = xl:get([Pid, name]),
+    {ok, a} = xl:get([Pid, a, name]),
+    {ok, Ref} = xl:subscribe([Pid, a]),
     xl:cast([Pid, a], crash),
     receive
         {Ref, {exit, Output}} ->
             #{'_sign' := {exception}} = Output,
             timer:sleep(5)
     end,
-    {ok, running} = xl:call([Pid, '_status'], get),
+    {ok, running} = xl:get([Pid, '_status']),
     {error, undefined} = xl:call([Pid, a], get_raw),
-    {ok, a} = xl:call([Pid, a, name], get),
+    {ok, a} = xl:get([Pid, a, name]),
     %% ==== "restart" recovery mode, heal immediately.
-    {ok, b} = xl:call([Pid, b, name], get),
-    {ok, RefB} = subscribe([Pid, b]),
+    {ok, b} = xl:get([Pid, b, name]),
+    {ok, RefB} = xl:subscribe([Pid, b]),
     xl:cast([Pid, b], crash),
     receive
         {RefB, {exit, #{'_sign' := {exception}}}} ->
             timer:sleep(5)
     end,
     {ok, {link, _, _}} = xl:call([Pid, b], get_raw),
-    {ok, b} = xl:call([Pid, b, name], get),
+    {ok, b} = xl:get([Pid, b, name]),
     {stopped, normal} = xl:stop(Pid).
 
 %%-------------------------------------------------------------------
@@ -362,17 +356,17 @@ test7() ->
     %% ==== normal loop ====
     {ok, F} = xl:start(Fsm),
     %% subscribe(F, Dump),
-    {ok, a} = xl:call([F, <<>>, '_id'], get),
+    {ok, a} = xl:get([F, <<>>, '_id']),
     xl:cast([F, <<>>], transfer),
-    {ok, b} = xl:call([F, <<>>, '_id'], get),
+    {ok, b} = xl:get([F, <<>>, '_id']),
     xl:cast([F, <<>>], transfer),
-    {ok, c} = xl:call([F, <<>>, '_id'], get),
+    {ok, c} = xl:get([F, <<>>, '_id']),
     xl:cast([F, <<>>], transfer),
-    {ok, d} = xl:call([F, <<>>, '_id'], get),
-    {error, undefined} = xl:call([F, '_retry_count'], get),
-    {ok, 4} = xl:call([F, '_step'], get),
+    {ok, d} = xl:get([F, <<>>, '_id']),
+    {error, undefined} = xl:get([F, '_retry_count']),
+    {ok, 4} = xl:get([F, '_step']),
     %% stop
-    {ok, Ref} = xl:call([F, <<>>], {subscribe, self()}),
+    {ok, Ref} = xl:subscribe([F, <<>>]),
     xl:cast([F, <<>>], transfer),
     {exit, Res} = receive
                       {Ref, Notify} ->
@@ -382,27 +376,27 @@ test7() ->
     %% ==== recovery loop ====
     {ok, F1} = xl:start(Fsm#{'_max_pending_size' => 0}),
     %% subscribe(F1, Dump),
-    {ok, a} = xl:call([F1, <<>>, '_id'], get),
+    {ok, a} = xl:get([F1, <<>>, '_id']),
     xl:cast([F1, <<>>], crash),  % => c
     {error, timeout} = xl:call([F1, <<>>, '_id'], get, 10),
     {ok, done} = xl:call(F1, {max_pending_size, 100}),
-    {ok, c} = xl:call([F1, <<>>, '_id'], get),
+    {ok, c} = xl:get([F1, <<>>, '_id']),
     xl:cast([F1, <<>>], transfer),
-    {ok, d} = xl:call([F1, <<>>, '_id'], get),
+    {ok, d} = xl:get([F1, <<>>, '_id']),
     xl:cast([F1, <<>>], crash),  % => restart
-    {ok, a} = xl:call([F1, <<>>, '_id'], get),
+    {ok, a} = xl:get([F1, <<>>, '_id']),
     xl:cast([F1, <<>>], transfer),
-    {ok, b} = xl:call([F1, <<>>, '_id'], get),
+    {ok, b} = xl:get([F1, <<>>, '_id']),
     xl:cast([F1, <<>>], crash),  % => rollback
     timer:sleep(3),
-    {ok, b} = xl:call([F1, '_state', '_id'], get),
+    {ok, b} = xl:get([F1, '_state', '_id']),
     xl:cast([F1, <<>>], transfer),  % => c
-    {ok, c} = xl:call([F1, <<>>, '_id'], get),
+    {ok, c} = xl:get([F1, <<>>, '_id']),
     xl:cast([F1, <<>>], crash),  % => rollback -2
-    {ok, c} = xl:call([F1, <<>>, '_id'], get),
-    {ok, 12} = xl:call([F1, '_step'], get),
-    {ok, 4} = xl:call([F1, '_retry_count'], get),
-    {ok, Ref1} = xl:call(F1, {subscribe, self()}),
+    {ok, c} = xl:get([F1, <<>>, '_id']),
+    {ok, 12} = xl:get([F1, '_step']),
+    {ok, 4} = xl:get([F1, '_retry_count']),
+    {ok, Ref1} = xl:subscribe(F1),
     xl:cast([F1, <<>>], crash),  % => exceed max retry count
     {exit, Res1} = receive
                        {Ref1, Notify1} ->

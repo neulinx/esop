@@ -13,16 +13,24 @@
     -include_lib("eunit/include/eunit.hrl").
 -endif.
 
+%% 
+-compile({no_auto_import,[get/1, put/2]}).
+
 -behaviour(gen_server).
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
-%% API
+%%- APIs
+%%-- Management APIs
 -export([create/1, create/2]).
 -export([start_link/1, start_link/2, start_link/3]).
 -export([start/1, start/2, start/3]).
 -export([stop/1, stop/2, stop/3]).
+%%-- External APIs
 -export([call/2, call/3, call/4, cast/2, cast/3, reply/2, notify/2]).
+-export([get/1, put/2, patch/2, delete/1]).
+-export([touch/1, subscribe/1, subscribe/2, unsubscribe/2]).
+%%-- Internal APIs
 -export([deliver/3, request/3, invoke/2, invoke/4]).
 -export([activate/2, attach/4, remove/2, remove/3]).
 -export([report/2, report/3]).
@@ -280,11 +288,6 @@
 %%   - Command, any form of request to target.
 %%
 %% Predefined commands:
-%% - touch and activate: touch -> touch_return.
-%%   - Start actor by value of the Key or last hop of the Path.
-%%   - Initialize the value by states.
-%%   - Return the activated value of the Key with type.
-%%   - Return current pid() if Key is not present.
 %% - get: get -> {code(), Result, state()}.
 %%   - Code is preferred 'ok' or 'error'.
 %%   - If value of Key is process or function, get request relay to process
@@ -306,6 +309,14 @@
 %%   - patch perform merge operation on data;
 %% - delete: delete -> {code(), Result, state()}.
 %%   - Response is preferred {ok, done, state()} or {error, Error, state()};
+%% - touch and activate: touch -> touch_return.
+%%   - Start actor by value of the Key or last hop of the Path.
+%%   - Initialize the value by states.
+%%   - Return the activated value of the Key with type.
+%%   - Return current pid() if Key is not present.
+%% - act: Data -> reply().
+%%   - Action name is the last element in the Path.
+%% @todo: subscribe & unsubscribe.
 %%
 %% Predefined signs:
 %% Generally, all internal signs are atom type.
@@ -518,7 +529,7 @@ create(Module, Data) when is_list(Data) ->
     create(Module, maps:from_list(Data)).
 
 %% --------------------------------------------------------------------
-%% API for invocation by message wrapping.
+%% APIs for invocations by messages wrapping.
 %% --------------------------------------------------------------------
 %% Same as gen_server:reply().
 -spec reply(from(), Reply :: term()) -> 'ok'.
@@ -607,6 +618,38 @@ wait_stop(Process, StopSignal, Timeout) ->
 notify(Process, Info) ->
     catch Process ! {xl_notify, Info},
     ok.
+
+-spec get(target()) -> reply().
+get(Target) ->
+    call(Target, get).
+
+-spec put(target(), term()) -> reply().
+put(Target, NewValue) ->
+    call(Target, {put, NewValue}).
+
+-spec patch(target(), term()) -> reply().
+patch(Target, Value) ->
+    call(Target, {patch, Value}).
+
+-spec delete(target()) -> reply().
+delete(Target) ->
+    call(Target, delete).
+
+-spec touch(target()) -> reply().
+touch(Target) ->
+    call(Target, touch).
+
+-spec subscribe(target()) -> reply().
+subscribe(Target) ->
+    subscribe(Target, self()).
+
+-spec subscribe(target(), pid()) -> reply().
+subscribe(Target, Pid) ->
+    call(Target, {subscribe, Pid}).
+
+-spec unsubscribe(target(), reference()) -> reply().
+unsubscribe(Target, Reference) ->
+    call(Target, {unsubscribe, Reference}).
 
 %% --------------------------------------------------------------------
 %% Process messages with path, when react function does not handle it.
@@ -1591,10 +1634,3 @@ flush_and_relay(Pid, Timeout) ->
     after Timeout ->
             true
     end.
-
-%%%===================================================================
-%%% Unit test
-%%%===================================================================
--ifdef(TEST).
-
--endif.
