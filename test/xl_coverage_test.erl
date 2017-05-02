@@ -504,7 +504,7 @@ coverage() ->
 
     S48 = #{a => 1, b => #{c => 2}},
     {ok, P48} = xl:start(S48),
-    F49 = fun({xlx,undefined,[p2],touch}, S) ->
+    F49 = fun({xlx, undefined, [p2], touch}, S) ->
                   {refer, [p1, a], S};
              (_M, S) ->
                   {error, undefined, S}
@@ -515,8 +515,8 @@ coverage() ->
                            bb => {refer, {P48, [b, c]}},
                            cc => {refer, {P48, [b, d]}},
                            dd => {refer, P48}}),
-    {data, 1} = xl:call([P48, a], touch),
-    {data, 1} = xl:call([P49, aa], touch),
+    {data, 1} = xl:touch([P48, a]),
+    {data, 1} = xl:touch([P49, aa]),
     {ok, 1} = xl:call([P49, aa], get),
     {ok, 2} = xl:call([P49, bb], get),
     {error, undefined} = xl:call([P49, cc], get),
@@ -529,7 +529,7 @@ coverage() ->
 
     S50 = #{d => 2, b => #{c => 3}},
     {ok, P50} = xl:start(S48),
-    {ok, done} = xl:call(P50, {patch, S50}),
+    {ok, done} = xl:patch(P50, S50),
     {ok, 2} = xl:call([P50, d], get),
     {ok, 3} = xl:call([P50, b, c], get_raw),
     {ok, 1} = xl:call([P50, a], get),
@@ -543,13 +543,13 @@ coverage() ->
     {ok, 3} = xl:call([P51, y], get),
     {ok, 3} = xl:call([P51, z, c], get),
     {ok, 3} = xl:call([P51, p, b, c], get),
-    {ok, done} = xl:call(P51, {patch, S48}),
+    {ok, done} = xl:patch(P51, S48),
     {ok, 2} = xl:call([P51, x, d], get),
     {ok, 2} = xl:call([P51, y], get),
     {ok, 3} = xl:call([P51, z, c], get),
     {ok, 1} = xl:call([P51, a], get),
-    {ok, done} = xl:call([P51, x, b], {patch, #{c => 4, e => 6}}),
-    {ok, done} = xl:call([P51, z], {patch, #{c => 5, e => 7}}),
+    {ok, done} = xl:patch([P51, x, b], #{c => 4, e => 6}),
+    {ok, done} = xl:patch([P51, z], #{c => 5, e => 7}),
     {ok, 4} = xl:call([P51, b, c], get),
     {ok, 6} = xl:call([P51, b, e], get),
     {ok, 5} = xl:call([P50, b, c], get),
